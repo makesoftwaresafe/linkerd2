@@ -1,3 +1,4 @@
+{{- if .Values.createNamespaceMetadataJob}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -7,6 +8,7 @@ metadata:
     "helm.sh/hook-weight": "1"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
   labels:
+    linkerd.io/extension: viz
     app.kubernetes.io/name: namespace-metadata
     app.kubernetes.io/part-of: Linkerd
     app.kubernetes.io/version: {{default .Values.linkerdVersion .Values.cliVersion}}
@@ -20,21 +22,26 @@ spec:
         {{ include "partials.annotations.created-by" . }}
         linkerd.io/inject: disabled
       labels:
+        linkerd.io/extension: viz
         app.kubernetes.io/name: namespace-metadata
         app.kubernetes.io/part-of: Linkerd
         app.kubernetes.io/version: {{default .Values.linkerdVersion .Values.cliVersion}}
         {{- with .Values.podLabels }}{{ toYaml . | trim | nindent 8 }}{{- end }}
     spec:
+      {{- if .Values.namespaceMetadata.tolerations -}}
+      {{- include "linkerd.tolerations" (dict "Values" .Values.namespaceMetadata) | nindent 6 }}
+      {{- end -}}
+      {{- include "linkerd.node-selector" (dict "Values" .Values.namespaceMetadata) | nindent 6 }}
       restartPolicy: Never
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: namespace-metadata
+      automountServiceAccountToken: false
       containers:
       - name: namespace-metadata
-        image: {{.Values.namespaceMetadata.image.registry}}/{{.Values.namespaceMetadata.image.name}}:{{.Values.namespaceMetadata.image.tag}}
+        image: {{.Values.namespaceMetadata.image.registry | default .Values.defaultRegistry}}/{{.Values.namespaceMetadata.image.name}}:{{.Values.namespaceMetadata.image.tag}}
         imagePullPolicy: {{.Values.namespaceMetadata.image.pullPolicy | default .Values.defaultImagePullPolicy}}
-        command: ["/bin/sh"]
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -43,40 +50,28 @@ spec:
           runAsNonRoot: true
           readOnlyRootFilesystem: true
           runAsUser: {{.Values.defaultUID}}
+          runAsGroup: {{.Values.defaultGID}}
           seccompProfile:
             type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: kube-api-access
+          readOnly: true
         args:
-        - -c
-        - |
-          ops=''
-          token=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-          ns=$(curl -kfv -H "Authorization: Bearer $token" \
-            "https://kubernetes.default.svc/api/v1/namespaces/{{.Release.Namespace}}")
-
-          if ! echo "$ns" | grep -q 'labels'; then
-            ops="$ops{\"op\": \"add\",\"path\": \"/metadata/labels\",\"value\": {}},"
-          fi
-          if ! echo "$ns" | grep -q 'annotations'; then
-            ops="$ops{\"op\": \"add\", \"path\": \"/metadata/annotations\", \"value\": {}},"
-          fi
-
-          {{- if .Values.prometheusUrl }}
-          ops="$ops{\"op\": \"add\", \"path\": \"/metadata/annotations/viz.linkerd.io~1external-prometheus\", \"value\": \"{{.Values.prometheusUrl}}\"},"
-          {{- end }}
-          ops="$ops{\"op\": \"add\", \"path\": \"/metadata/labels/linkerd.io~1extension\", \"value\": \"viz\"},"
-
-          # grab the latest occurence of cniEnabled in linkerd-config, to
-          # discard value in the last-applied-configuration annotation
-          cniEnabled=$(curl -kfv -H "Authorization: Bearer $token" \
-            "https://kubernetes.default.svc/api/v1/namespaces/{{.Values.linkerdNamespace}}/configmaps/linkerd-config" | \
-            sed -r -n 's/.*cniEnabled: (\w+).*/\1/gp' | tail -1)
-
-          level="privileged"
-          if [ "$cniEnabled" = "true" ]; then
-            level="restricted"
-          fi
-          ops="$ops{\"op\": \"add\", \"path\": \"/metadata/labels/pod-security.kubernetes.io~1enforce\", \"value\": \"$level\"}"
-
-          curl -kfv -XPATCH -H "Content-Type: application/json-patch+json" -H "Authorization: Bearer $token" \
-            -d "[$ops]" \
-            "https://kubernetes.default.svc/api/v1/namespaces/{{.Release.Namespace}}?fieldManager=kubectl-label"
+        - --log-format
+        - {{.Values.defaultLogFormat}}
+        - --log-level
+        - {{.Values.defaultLogLevel}}
+        - --extension
+        - viz
+        - --namespace
+        - {{.Release.Namespace}}
+        - --linkerd-namespace
+        - {{.Values.linkerdNamespace}}
+        {{- with .Values.prometheusUrl }}
+        - --prometheus-url
+        - {{.}}
+        {{- end }}
+      volumes:
+      - {{- include "partials.volumes.manual-mount-service-account-token" . | indent 8 | trimPrefix (repeat 7 " ") }}
+{{- end }}

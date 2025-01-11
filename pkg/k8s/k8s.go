@@ -19,6 +19,7 @@ const (
 	Deployment            = "deployment"
 	Endpoints             = "endpoints"
 	EndpointSlices        = "endpointslices"
+	ExtWorkload           = "externalworkload"
 	Job                   = "job"
 	MeshTLSAuthentication = "meshtlsauthentication"
 	MutatingWebhookConfig = "mutatingwebhookconfig"
@@ -37,22 +38,27 @@ const (
 	AuthorizationPolicy   = "authorizationpolicy"
 	HTTPRoute             = "httproute"
 
-	PolicyAPIGroup   = "policy.linkerd.io"
-	PolicyAPIVersion = "v1beta1"
+	PolicyAPIGroup         = "policy.linkerd.io"
+	PolicyServerCRDVersion = "v1beta3"
 
 	ServiceProfileAPIVersion = "linkerd.io/v1alpha2"
 	ServiceProfileKind       = "ServiceProfile"
 
 	LinkAPIGroup        = "multicluster.linkerd.io"
-	LinkAPIVersion      = "v1alpha1"
-	LinkAPIGroupVersion = "multicluster.linkerd.io/v1alpha1"
+	LinkAPIVersion      = "v1alpha2"
+	LinkAPIGroupVersion = "multicluster.linkerd.io/v1alpha2"
 	LinkKind            = "Link"
 
 	K8sCoreAPIGroup = "core"
 
-	NamespaceKind = "Namespace"
-	ServerKind    = "Server"
-	HTTPRouteKind = "HTTPRoute"
+	NamespaceKind   = "Namespace"
+	ServerKind      = "Server"
+	HTTPRouteKind   = "HTTPRoute"
+	ExtWorkloadKind = "ExternalWorkload"
+	PodKind         = "Pod"
+
+	WorkloadAPIGroup   = "workload.linkerd.io"
+	WorkloadAPIVersion = "v1alpha1"
 
 	// special case k8s job label, to not conflict with Prometheus' job label
 	l5dJob = "k8s_job"
@@ -133,6 +139,7 @@ var resourceNames = []resourceName{
 	{"srvauthz", "serverauthorization", "serverauthorizations"},
 	{"srv", "server", "servers"},
 	{"ap", "authorizationpolicy", "authorizationpolicies"},
+	{"httproute", "httproute", "httproutes"},
 	{"authzpolicy", "authorizationpolicy", "authorizationpolicies"},
 	{"sts", "statefulset", "statefulsets"},
 	{"ln", "link", "links"},
@@ -232,7 +239,8 @@ func PodIdentity(pod *corev1.Pod) (string, error) {
 
 	podsa := pod.Spec.ServiceAccountName
 	podns := pod.ObjectMeta.Namespace
-	for _, c := range pod.Spec.Containers {
+	containers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+	for _, c := range containers {
 		if c.Name == ProxyContainerName {
 			for _, env := range c.Env {
 				if env.Name == "LINKERD2_PROXY_IDENTITY_LOCAL_NAME" {

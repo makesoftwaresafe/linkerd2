@@ -74,7 +74,7 @@ func Inject(linkerdNamespace string) webhook.Handler {
 		if ownerRef := resourceConfig.GetOwnerRef(); ownerRef != nil {
 			res, err := k8s.GetAPIResource(ownerRef.Kind)
 			if err != nil {
-				log.Warningf("skipping event for parent %s: %s", ownerRef.Kind, err)
+				log.Tracef("skipping event for parent %s: %s", ownerRef.Kind, err)
 			} else {
 				objs, err := api.GetByNamespaceFiltered(res, request.Namespace, ownerRef.Name, labels.Everything())
 				if err != nil {
@@ -99,11 +99,11 @@ func Inject(linkerdNamespace string) webhook.Handler {
 
 			// If namespace has annotations that do not exist on pod then copy them
 			// over to pod's template.
-			resourceConfig.AppendNamespaceAnnotations()
+			inject.AppendNamespaceAnnotations(resourceConfig.GetOverrideAnnotations(), resourceConfig.GetNsAnnotations(), resourceConfig.GetWorkloadAnnotations())
 
 			// If the pod did not inherit the opaque ports annotation from the
 			// namespace, then add the default value from the config values. This
-			// ensures that the generated patch always sets the opaue ports
+			// ensures that the generated patch always sets the opaque ports
 			// annotation.
 			if !resourceConfig.HasWorkloadAnnotation(pkgK8s.ProxyOpaquePortsAnnotation) {
 				defaultPorts := strings.Split(resourceConfig.GetValues().Proxy.OpaquePorts, ",")

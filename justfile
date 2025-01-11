@@ -50,6 +50,8 @@ rs-check-fmt:
 rs-clippy:
     {{ _cargo }} clippy --frozen --workspace --all-targets --no-deps {{ _features }} {{ _fmt }}
 
+alias clippy := rs-clippy
+
 # Audit Rust dependencies.
 rs-audit-deps:
     {{ _cargo }} deny {{ _features }} check
@@ -64,8 +66,7 @@ rs-doc *flags:
 rs-test-build:
     {{ _cargo-test }} --no-run --frozen \
         --workspace --exclude=linkerd-policy-test \
-        {{ _features }} \
-        {{ _fmt }}
+        {{ _features }}
 
 # Run Rust unit tests
 rs-test *flags:
@@ -131,7 +132,7 @@ _cargo-test := _cargo + ```
 ## Policy integration tests
 ##
 
-export POLICY_TEST_CONTEXT := "k3d-" + k3d-name
+export POLICY_TEST_CONTEXT := env_var_or_default("POLICY_TEST_CONTEXT", "k3d-" + k3d-name)
 
 # Install linkerd in the test cluster and run the policy tests.
 policy-test: linkerd-install policy-test-deps-load policy-test-run && policy-test-cleanup linkerd-uninstall
@@ -142,7 +143,7 @@ policy-test-run *flags:
 
 # Build the policy tests without running them.
 policy-test-build:
-    cd policy-test && {{ _cargo-test }} --no-run {{ _fmt }}
+    cd policy-test && {{ _cargo-test }} --no-run
 
 # Delete all test namespaces and remove linkerd from the cluster.
 policy-test-cleanup:
@@ -159,7 +160,8 @@ policy-test-deps-load: _k3d-init policy-test-deps-pull
     for i in {1..3} ; do {{ _k3d-load }} \
         bitnami/kubectl:latest \
         curlimages/curl:latest \
-        ghcr.io/olix0r/hokay:latest && exit ; sleep 1 ; done
+        fortio/fortio:latest \
+        ghcr.io/olix0r/hokay:latest && exit || sleep 1 ; done
 
 ##
 ## Test cluster
@@ -271,7 +273,7 @@ _pause-load: _k3d-init
     if [ -z "$(docker image ls -q "$img")" ]; then
        docker pull -q "$img"
     fi
-    k3d image import --mode=direct --cluster='{{ k3d-name }}' "$img"
+    for i in {1..3} ; do {{ _k3d-load }} "$img" && exit || sleep 1 ; done
 
 ##
 ## Linkerd CLI
@@ -281,18 +283,17 @@ _pause-load: _k3d-init
 linkerd-exec := "bin/linkerd"
 _linkerd := linkerd-exec + " " + _context
 
-# TODO(ver) we should pin the tag in the image (and split appropriately where
-# we need to). so that it's possible to override a single image compltely. but
-# doing this would mean that we need to invoke `yq` in some cases, and this
-# dependency isn't universally available (e.g. in ci). if we change ci to use a
-# devcontainer base image.
-
 controller-image := DOCKER_REGISTRY + "/controller"
 proxy-image := DOCKER_REGISTRY + "/proxy"
-proxy-init-image := DOCKER_REGISTRY + "/proxy-init"
-orig-proxy-init-image := "ghcr.io/linkerd/proxy-init"
 policy-controller-image := DOCKER_REGISTRY + "/policy-controller"
-cni-plugin-image := DOCKER_REGISTRY + "/cni-plugin"
+
+# External dependencies
+#
+# We execute these commands lazily in case `yq` isn't present (so that other
+# just recipes can succeed).
+_proxy-init-image-cmd := "yq '.proxyInit.image | \"ghcr.io/linkerd/proxy-init:\" + .version' charts/linkerd-control-plane/values.yaml"
+_cni-plugin-image-cmd := "yq '.image | \"ghcr.io/linkerd/cni-plugin:\" + .version' charts/linkerd2-cni/values.yaml"
+_prometheus-image-cmd := "yq '.prometheus.image | .registry + \"/\" + .name + \":\" + .tag'  viz/charts/linkerd-viz/values.yaml"
 
 linkerd *flags:
     {{ _linkerd }} {{ flags }}
@@ -316,8 +317,7 @@ linkerd-install *args='': linkerd-load linkerd-crds-install && _linkerd-ready
             --set='policyController.loglevel=info\,linkerd=trace\,kubert=trace' \
             --set='proxy.image.name={{ proxy-image }}' \
             --set='proxy.image.version={{ linkerd-tag }}' \
-            --set='proxyInit.image.name={{ proxy-init-image }}' \
-            --set="proxyInit.image.version=$(yq .proxyInit.image.version charts/linkerd-control-plane/values.yaml)" \
+            --set='proxyInit.image.name=ghcr.io/linkerd/proxy-init' \
             {{ args }} \
         | {{ _kubectl }} apply -f -
 
@@ -331,8 +331,11 @@ linkerd-load: _linkerd-images _k3d-init
         '{{ controller-image }}:{{ linkerd-tag }}' \
         '{{ policy-controller-image }}:{{ linkerd-tag }}' \
         '{{ proxy-image }}:{{ linkerd-tag }}' \
-        "{{ cni-plugin-image }}:$(yq .image.version charts/linkerd2-cni/values.yaml)" \
-        "{{ proxy-init-image }}:$(yq .proxyInit.image.version charts/linkerd-control-plane/values.yaml)" && exit ; sleep 1 ; done
+        $({{ _proxy-init-image-cmd }}) && exit || sleep 1 ; done
+
+linkerd-load-cni:
+    docker pull -q $({{ _cni-plugin-image-cmd }})
+    {{ _k3d-load }} $({{ _cni-plugin-image-cmd }})
 
 linkerd-build: _policy-controller-build
     TAG={{ linkerd-tag }} bin/docker-build-controller
@@ -341,11 +344,7 @@ linkerd-build: _policy-controller-build
 _linkerd-images:
     #!/usr/bin/env bash
     set -xeuo pipefail
-    docker pull -q "{{ orig-proxy-init-image }}:$(yq .proxyInit.image.version charts/linkerd-control-plane/values.yaml)"
-    docker pull -q "{{ cni-plugin-image }}:$(yq .image.version charts/linkerd2-cni/values.yaml)"
-    docker tag \
-        "{{ orig-proxy-init-image }}:$(yq .proxyInit.image.version charts/linkerd-control-plane/values.yaml)" \
-        "{{ proxy-init-image }}:$(yq .proxyInit.image.version charts/linkerd-control-plane/values.yaml)"
+    docker pull -q $({{ _proxy-init-image-cmd }})
     for img in \
         '{{ controller-image }}:{{ linkerd-tag }}' \
         '{{ policy-controller-image }}:{{ linkerd-tag }}' \
@@ -356,8 +355,6 @@ _linkerd-images:
             exec {{ just_executable() }} \
                 controller-image='{{ controller-image }}' \
                 policy-controller-image='{{ policy-controller-image }}' \
-                proxy-image='{{ proxy-image }}' \
-                proxy-init-image='{{ proxy-init-image }}' \
                 linkerd-tag='{{ linkerd-tag }}' \
                 linkerd-build
         fi
@@ -366,16 +363,19 @@ _linkerd-images:
 # Build the policy controller docker image for testing (on amd64).
 _policy-controller-build:
     docker buildx build . \
-        --file='policy-controller/{{ if docker-arch == '' { "amd64" } else { docker-arch } }}.dockerfile' \
+        --file='policy-controller/Dockerfile' \
+        --platform={{ if docker-arch == '' { "amd64" } else { docker-arch} }} \
         --build-arg='build_type={{ rs-build-type }}' \
         --tag='{{ policy-controller-image }}:{{ linkerd-tag }}' \
         --progress=plain \
         --load
 
 _linkerd-ready:
-    {{ _kubectl }} wait pod --for=condition=ready \
-        --namespace=linkerd --selector='linkerd.io/control-plane-component' \
-        --timeout=1m
+    if ! {{ _kubectl }} wait pod --for=condition=ready \
+            --namespace=linkerd --selector='linkerd.io/control-plane-component' \
+            --timeout=1m ; then \
+        {{ _kubectl }} describe pods --namespace=linkerd ; \
+    fi
 
 # Ensure that a linkerd control plane is installed
 _linkerd-init: && _linkerd-ready
@@ -392,8 +392,6 @@ _linkerd-init: && _linkerd-ready
             linkerd-tag='{{ linkerd-tag }}' \
             controller-image='{{ controller-image }}' \
             proxy-image='{{ proxy-image }}' \
-            proxy-init-image='{{ proxy-init-image }}' \
-            cni-plugin-image='{{ cni-plugin-image }}'
             linkerd-exec='{{ linkerd-exec }}' \
             linkerd-install
     fi
@@ -420,8 +418,7 @@ linkerd-viz-uninstall:
 _linkerd-viz-images:
     #!/usr/bin/env bash
     set -euo pipefail
-    docker pull -q $(yq '.prometheus.image | .registry + "/" + .name + ":" + .tag' \
-        viz/charts/linkerd-viz/values.yaml)
+    docker pull -q $({{ _prometheus-image-cmd }})
     for img in \
         '{{ DOCKER_REGISTRY }}/metrics-api:{{ linkerd-tag }}' \
         '{{ DOCKER_REGISTRY }}/tap:{{ linkerd-tag }}' \
@@ -440,8 +437,7 @@ linkerd-viz-load: _linkerd-viz-images _k3d-init
         {{ DOCKER_REGISTRY }}/metrics-api:{{ linkerd-tag }} \
         {{ DOCKER_REGISTRY }}/tap:{{ linkerd-tag }} \
         {{ DOCKER_REGISTRY }}/web:{{ linkerd-tag }} \
-        "$(yq '.prometheus.image | .registry + "/" + .name + ":" + .tag' \
-                viz/charts/linkerd-viz/values.yaml)" && exit ; sleep 1 ; done
+        $({{ _prometheus-image-cmd }}) && exit || sleep 1 ; done
 
 linkerd-viz-build:
     TAG={{ linkerd-tag }} bin/docker-build-metrics-api
@@ -468,9 +464,9 @@ _linkerd-viz-uninit:
 
 ##
 ## linkerd multicluster
-## 
+##
 
-_mc-target-k3d-flags := "--k3s-arg --disable='local-storage,metrics-server@server:*'"
+_mc-target-k3d-flags := "--k3s-arg --disable='local-storage,metrics-server@server:*' --k3s-arg '--cluster-cidr=10.23.0.0/24@server:*'"
 
 linkerd-mc-install: _linkerd-init
     {{ _linkerd }} mc install --set='linkerdVersion={{ linkerd-tag }}' \
@@ -490,7 +486,7 @@ mc-target-k3d-delete:
             k3d-delete
     fi
 
-_mc-load: _k3d-init linkerd-load linkerd-viz-load
+_mc-load: _k3d-init linkerd-load
 
 _mc-target-load:
     @{{ just_executable() }} \
@@ -502,30 +498,37 @@ _mc-target-load:
         _k3d-flags='{{ _mc-target-k3d-flags }}' \
         controller-image='{{ controller-image }}' \
         proxy-image='{{ proxy-image }}' \
-        proxy-init-image='{{ proxy-init-image }}' \
-        cni-plugin-image='{{ cni-plugin-image }}' \
         linkerd-exec='{{ linkerd-exec }}' \
         linkerd-tag='{{ linkerd-tag }}' \
         _pause-load \
         _mc-load
 
 # Run the multicluster tests with cluster setup
-#
-# The multicluster test does its own installation of control planes/etc, so
-# we don't do any setup beyond ensuring the cluster is present with images
-# loaded.
 mc-test: mc-test-load mc-test-run
 
 mc-test-build:
     go build --mod=readonly \
         ./test/integration/multicluster/...
 
-mc-test-load: _mc-load _mc-target-load
+mc-test-load: _mc-load _mc-target-load mc-flat-network-init
+
+k3d-source-server := "k3d-" + k3d-name + "-server-0"
+k3d-target-server := "k3d-" + k3d-name + "-target-server-0"
+
+_mc-route-output-fmt := "-o jsonpath='ip route add {.spec.podCIDR} via {.status.addresses[?(.type==\"InternalIP\")].address}'"
+_mc-print-source-route := _kubectl + " " + "get node " + k3d-source-server + " " + _mc-route-output-fmt
+_mc-print-target-route := "kubectl --context=k3d-" + k3d-name + "-target "+ "get node " + k3d-target-server + " " + _mc-route-output-fmt
+
+# Allow two k3d server nodes to participate in a flat network
+mc-flat-network-init:
+	@docker exec k3d-{{k3d-name}}-server-0 `{{_mc-print-target-route}}`
+	@docker exec k3d-{{k3d-name}}-target-server-0 `{{_mc-print-source-route}}`
+
 
 # Run the multicluster tests without any setup
 mc-test-run:
     LINKERD_DOCKER_REGISTRY='{{ DOCKER_REGISTRY }}' \
-        go test -test.timeout=20m --failfast --mod=readonly \
+        go test -v -test.timeout=20m --failfast --mod=readonly \
             ./test/integration/multicluster/... \
                 -integration-tests \
                 -linkerd='{{ justfile_directory() }}/bin/linkerd' \

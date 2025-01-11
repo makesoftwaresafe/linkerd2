@@ -209,6 +209,10 @@ func generateAnnotationsDocs() []annotationDoc {
 			Description: "Run the proxy under this user ID",
 		},
 		{
+			Name:        k8s.ProxyGIDAnnotation,
+			Description: "Run the proxy under this group ID",
+		},
+		{
 			Name:        k8s.ProxyLogLevelAnnotation,
 			Description: "Log level for the proxy",
 		},
@@ -238,11 +242,27 @@ func generateAnnotationsDocs() []annotationDoc {
 		},
 		{
 			Name:        k8s.ProxyOutboundConnectTimeout,
-			Description: "Used to configure the outbound TCP connection timeout in the proxy",
+			Description: "Used to configure the outbound TCP connection timeout in the proxy. Defaults to `1000ms`",
 		},
 		{
 			Name:        k8s.ProxyInboundConnectTimeout,
-			Description: "Inbound TCP connection timeout in the proxy",
+			Description: "Inbound TCP connection timeout in the proxy. Defaults to `100ms`",
+		},
+		{
+			Name:        k8s.ProxyOutboundDiscoveryCacheUnusedTimeout,
+			Description: "Maximum time allowed before an unused outbound discovery result is evicted from the cache. Defaults to `5s`",
+		},
+		{
+			Name:        k8s.ProxyInboundDiscoveryCacheUnusedTimeout,
+			Description: "Maximum time allowed before an unused inbound discovery result is evicted from the cache. Defaults to `90s`",
+		},
+		{
+			Name:        k8s.ProxyDisableOutboundProtocolDetectTimeout,
+			Description: "When set to true, disables the protocol detection timeout on the outbound side of the proxy by setting it to a very high value",
+		},
+		{
+			Name:        k8s.ProxyDisableInboundProtocolDetectTimeout,
+			Description: "When set to true, disables the protocol detection timeout on the inbound side of the proxy by setting it to a very high value",
 		},
 		{
 			Name:        k8s.ProxyWaitBeforeExitSecondsAnnotation,
@@ -263,6 +283,10 @@ func generateAnnotationsDocs() []annotationDoc {
 		{
 			Name:        k8s.ProxyShutdownGracePeriodAnnotation,
 			Description: "Grace period for graceful proxy shutdowns. If this timeout elapses before all open connections have completed, the proxy will terminate forcefully, closing any remaining connections.",
+		},
+		{
+			Name:        k8s.ProxyEnableNativeSidecarAnnotation,
+			Description: "Enable KEP-753 native sidecars. This is an experimental feature. It requires Kubernetes >= 1.29. If enabled, .proxy.waitBeforeExitSeconds should not be used.",
 		},
 	}
 }

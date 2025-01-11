@@ -1,7 +1,8 @@
 pub use k8s_gateway_api::{
-    CommonRouteSpec, Hostname, HttpHeader, HttpHeaderMatch, HttpHeaderName, HttpMethod,
-    HttpPathMatch, HttpPathModifier, HttpQueryParamMatch, HttpRequestHeaderFilter,
-    HttpRequestRedirectFilter, HttpRouteMatch, LocalObjectReference, ParentReference, RouteStatus,
+    BackendObjectReference, CommonRouteSpec, Hostname, HttpBackendRef, HttpHeader, HttpHeaderMatch,
+    HttpHeaderName, HttpMethod, HttpPathMatch, HttpPathModifier, HttpQueryParamMatch,
+    HttpRequestHeaderFilter, HttpRequestRedirectFilter, HttpRouteMatch, LocalObjectReference,
+    ParentReference, RouteStatus,
 };
 
 /// HTTPRoute provides a way to route HTTP requests. This includes the
@@ -19,9 +20,9 @@ pub use k8s_gateway_api::{
 )]
 #[kube(
     group = "policy.linkerd.io",
-    version = "v1alpha1",
+    version = "v1beta3",
     kind = "HTTPRoute",
-    struct = "HttpRoute",
+    root = "HttpRoute",
     status = "HttpRouteStatus",
     namespaced
 )]
@@ -83,8 +84,7 @@ pub struct HttpRouteRule {
     ///
     /// Proxy or Load Balancer routing configuration generated from HTTPRoutes
     /// MUST prioritize rules based on the following criteria, continuing on
-    /// ties. Precedence must be given to the the Rule with the largest number
-    /// of:
+    /// ties. Precedence must be given to the Rule with the largest number of:
     ///
     /// * Characters in a matching non-wildcard hostname.
     /// * Characters in a matching hostname.
@@ -126,6 +126,39 @@ pub struct HttpRouteRule {
     ///
     /// Support: Core
     pub filters: Option<Vec<HttpRouteFilter>>,
+
+    /// BackendRefs defines the backend(s) where matching requests should be
+    /// sent.
+    ///
+    /// A 500 status code MUST be returned if there are no BackendRefs or
+    /// filters specified that would result in a response being sent.
+    ///
+    /// A BackendRef is considered invalid when it refers to:
+    ///
+    /// * an unknown or unsupported kind of resource
+    /// * a resource that does not exist
+    /// * a resource in another namespace when the reference has not been
+    ///   explicitly allowed by a ReferencePolicy (or equivalent concept).
+    ///
+    /// When a BackendRef is invalid, 500 status codes MUST be returned for
+    /// requests that would have otherwise been routed to an invalid backend. If
+    /// multiple backends are specified, and some are invalid, the proportion of
+    /// requests that would otherwise have been routed to an invalid backend
+    /// MUST receive a 500 status code.
+    ///
+    /// When a BackendRef refers to a Service that has no ready endpoints, it is
+    /// recommended to return a 503 status code.
+    ///
+    /// Support: Core for Kubernetes Service
+    /// Support: Custom for any other resource
+    ///
+    /// Support for weight: Core
+    pub backend_refs: Option<Vec<HttpBackendRef>>,
+
+    /// Timeouts defines the timeouts that can be configured for an HTTP request.
+    ///
+    /// Support: Core
+    pub timeouts: Option<HttpRouteTimeouts>,
 }
 
 /// HTTPRouteFilter defines processing steps that must be completed during the
@@ -148,6 +181,15 @@ pub enum HttpRouteFilter {
         request_header_modifier: HttpRequestHeaderFilter,
     },
 
+    /// ResponseHeaderModifier defines a schema for a filter that modifies response
+    /// headers.
+    ///
+    /// Support: Extended
+    #[serde(rename_all = "camelCase")]
+    ResponseHeaderModifier {
+        response_header_modifier: HttpRequestHeaderFilter,
+    },
+
     /// RequestRedirect defines a schema for a filter that responds to the
     /// request with an HTTP redirection.
     ///
@@ -166,6 +208,36 @@ pub struct HttpRouteStatus {
     pub inner: RouteStatus,
 }
 
+/// HTTPRouteTimeouts defines timeouts that can be configured for an HTTPRoute.
+/// Timeout values are formatted like 1h/1m/1s/1ms as parsed by Golang time.ParseDuration
+/// and MUST BE >= 1ms.
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpRouteTimeouts {
+    /// Request specifies a timeout for the Gateway to send a response to a client HTTP request.
+    /// Whether the gateway starts the timeout before or after the entire client request stream
+    /// has been received, is implementation dependent.
+    ///
+    /// For example, setting the `rules.timeouts.request` field to the value `10s` in an
+    /// `HTTPRoute` will cause a timeout if a client request is taking longer than 10 seconds
+    /// to complete.
+    ///
+    /// Request timeouts are disabled by default.
+    ///
+    /// Support: Core
+    pub request: Option<crate::duration::K8sDuration>,
+    /// BackendRequest specifies a timeout for an individual request from the gateway
+    /// to a backend service. Typically used in conjunction with retry configuration,
+    /// if supported by an implementation.
+    ///
+    /// The value of BackendRequest defaults to and must be <= the value of Request timeout.
+    ///
+    /// Support: Extended
+    pub backend_request: Option<crate::duration::K8sDuration>,
+}
+
 pub fn parent_ref_targets_kind<T>(parent_ref: &ParentReference) -> bool
 where
     T: kube::Resource,
@@ -177,4 +249,16 @@ where
     };
 
     super::targets_kind::<T>(parent_ref.group.as_deref(), kind)
+}
+
+pub fn backend_ref_targets_kind<T>(backend_ref: &BackendObjectReference) -> bool
+where
+    T: kube::Resource,
+    T::DynamicType: Default,
+{
+    // Default kind is assumed to be service for backend ref objects
+    super::targets_kind::<T>(
+        backend_ref.group.as_deref(),
+        backend_ref.kind.as_deref().unwrap_or("Service"),
+    )
 }

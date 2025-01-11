@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/metadata/metadatainformer"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -33,18 +34,21 @@ type MetadataAPI struct {
 
 // InitializeMetadataAPI returns an instance of MetadataAPI with metadata
 // informers for the provided resources
-func InitializeMetadataAPI(kubeConfig string, resources ...APIResource) (*MetadataAPI, error) {
+func InitializeMetadataAPI(kubeConfig string, cluster string, resources ...APIResource) (*MetadataAPI, error) {
 	config, err := k8s.GetConfig(kubeConfig, "")
 	if err != nil {
 		return nil, fmt.Errorf("error configuring Kubernetes API client: %w", err)
 	}
+	return InitializeMetadataAPIForConfig(config, cluster, resources...)
+}
 
-	client, err := metadata.NewForConfig(config)
+func InitializeMetadataAPIForConfig(kubeConfig *rest.Config, cluster string, resources ...APIResource) (*MetadataAPI, error) {
+	client, err := metadata.NewForConfig(kubeConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	api, err := newClusterScopedMetadataAPI(client, resources...)
+	api, err := newClusterScopedMetadataAPI(client, cluster, resources...)
 	if err != nil {
 		return nil, err
 	}
@@ -55,15 +59,17 @@ func InitializeMetadataAPI(kubeConfig string, resources ...APIResource) (*Metada
 		}
 	}
 	return api, nil
+
 }
 
 func newClusterScopedMetadataAPI(
 	metadataClient metadata.Interface,
+	cluster string,
 	resources ...APIResource,
 ) (*MetadataAPI, error) {
 	sharedInformers := metadatainformer.NewFilteredSharedInformerFactory(
 		metadataClient,
-		resyncTime,
+		ResyncTime,
 		metav1.NamespaceAll,
 		nil,
 	)
@@ -75,8 +81,12 @@ func newClusterScopedMetadataAPI(
 		sharedInformers: sharedInformers,
 	}
 
+	informerLabels := prometheus.Labels{
+		"cluster": cluster,
+	}
+
 	for _, resource := range resources {
-		if err := api.addInformer(resource); err != nil {
+		if err := api.addInformer(resource, informerLabels); err != nil {
 			return nil, err
 		}
 	}
@@ -88,6 +98,11 @@ func (api *MetadataAPI) Sync(stopCh <-chan struct{}) {
 	api.sharedInformers.Start(stopCh)
 
 	waitForCacheSync(api.syncChecks)
+}
+
+// UnregisterGauges unregisters all the prometheus cache gauges associated to this API
+func (api *MetadataAPI) UnregisterGauges() {
+	api.promGauges.unregister()
 }
 
 func (api *MetadataAPI) getLister(res APIResource) (cache.GenericLister, error) {
@@ -257,7 +272,7 @@ func (api *MetadataAPI) GetOwnerKindAndName(ctx context.Context, pod *corev1.Pod
 	return strings.ToLower(parent.Kind), parent.Name, nil
 }
 
-func (api *MetadataAPI) addInformer(res APIResource) error {
+func (api *MetadataAPI) addInformer(res APIResource, informerLabels prometheus.Labels) error {
 	gvk, err := res.GVK()
 	if err != nil {
 		return err
@@ -265,7 +280,7 @@ func (api *MetadataAPI) addInformer(res APIResource) error {
 	gvr, _ := meta.UnsafeGuessKindToResource(gvk)
 	inf := api.sharedInformers.ForResource(gvr)
 	api.syncChecks = append(api.syncChecks, inf.Informer().HasSynced)
-	api.promGauges.addInformerSize(strings.ToLower(gvk.Kind), inf.Informer())
+	api.promGauges.addInformerSize(strings.ToLower(gvk.Kind), informerLabels, inf.Informer())
 	api.inf[res] = inf
 
 	return nil

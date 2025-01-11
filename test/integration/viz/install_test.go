@@ -84,6 +84,10 @@ func TestInstallVizHA(t *testing.T) {
 		"--ha",
 	}
 
+	if TestHelper.NativeSidecar() {
+		cmd = append(cmd, "--set", "proxy.nativeSidecar=true")
+	}
+
 	out, err := TestHelper.LinkerdRun(cmd...)
 	if err != nil {
 		testutil.AnnotatedFatal(t, "'linkerd viz install' command failed", err)
@@ -147,7 +151,7 @@ func TestDashboard(t *testing.T) {
 	output := strings.Join(outputLines, "")
 	if !strings.Contains(output, dashboardURL) {
 		testutil.AnnotatedFatalf(t,
-			"dashboard command failed. Expected url [%s] not present", dashboardURL)
+			"dashboard command failed", "Expected url [%s] not present", dashboardURL)
 	}
 
 	resp, err := TestHelper.HTTPGetURL(dashboardURL + "/api/version")

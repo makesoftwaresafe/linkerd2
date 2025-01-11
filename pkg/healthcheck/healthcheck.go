@@ -138,6 +138,10 @@ const (
 	// corresponding pods
 	LinkerdOpaquePortsDefinitionChecks CategoryID = "linkerd-opaque-ports-definition"
 
+	// LinkerdExtensionChecks adds checks to validate configuration for all
+	// extensions discovered in the cluster at runtime
+	LinkerdExtensionChecks CategoryID = "linkerd-extension-checks"
+
 	// LinkerdCNIResourceLabel is the label key that is used to identify
 	// whether a Kubernetes resource is related to the install-cni command
 	// The value is expected to be "true", "false" or "", where "false" and
@@ -1385,21 +1389,6 @@ func (hc *HealthChecker) allCategories() []*Category {
 			LinkerdHAChecks,
 			[]Checker{
 				{
-					description: "pod injection disabled on kube-system",
-					hintAnchor:  "l5d-injection-disabled",
-					warning:     true,
-					check: func(ctx context.Context) error {
-						policy, err := hc.getMutatingWebhookFailurePolicy(ctx)
-						if err != nil {
-							return err
-						}
-						if policy != nil && *policy == admissionRegistration.Fail {
-							return hc.checkHAMetadataPresentOnKubeSystemNamespace(ctx)
-						}
-						return SkipError{Reason: "not run for non HA installs"}
-					},
-				},
-				{
 					description:   "multiple replicas of control plane pods",
 					hintAnchor:    "l5d-control-plane-replicas",
 					retryDeadline: hc.RetryDeadline,
@@ -1409,6 +1398,20 @@ func (hc *HealthChecker) allCategories() []*Category {
 							return hc.checkMinReplicasAvailable(ctx)
 						}
 						return SkipError{Reason: "not run for non HA installs"}
+					},
+				},
+			},
+			false,
+		),
+		NewCategory(
+			LinkerdExtensionChecks,
+			[]Checker{
+				{
+					description: "namespace configuration for extensions",
+					warning:     true,
+					hintAnchor:  "l5d-extension-namespaces",
+					check: func(ctx context.Context) error {
+						return hc.checkExtensionNsLabels(ctx)
 					},
 				},
 			},
@@ -1429,7 +1432,7 @@ func CheckProxyVersionsUpToDate(pods []corev1.Pod, versions version.Channels) er
 	outdatedPods := []string{}
 	for _, pod := range pods {
 		status := k8s.GetPodStatus(pod)
-		if status == string(corev1.PodRunning) && containsProxy(pod) {
+		if status == string(corev1.PodRunning) {
 			proxyVersion := k8s.GetProxyVersion(pod)
 			if proxyVersion == "" {
 				continue
@@ -1438,6 +1441,9 @@ func CheckProxyVersionsUpToDate(pods []corev1.Pod, versions version.Channels) er
 				outdatedPods = append(outdatedPods, fmt.Sprintf("\t* %s (%s)", pod.Name, proxyVersion))
 			}
 		}
+	}
+	if versions.Empty() {
+		return errors.New("unable to determine version channel")
 	}
 	if len(outdatedPods) > 0 {
 		podList := strings.Join(outdatedPods, "\n")
@@ -1450,8 +1456,9 @@ func CheckProxyVersionsUpToDate(pods []corev1.Pod, versions version.Channels) er
 // matches that of the CLI
 func CheckIfProxyVersionsMatchWithCLI(pods []corev1.Pod) error {
 	for _, pod := range pods {
+		status := k8s.GetPodStatus(pod)
 		proxyVersion := k8s.GetProxyVersion(pod)
-		if proxyVersion != "" && proxyVersion != version.Version {
+		if status == string(corev1.PodRunning) && proxyVersion != "" && proxyVersion != version.Version {
 			return fmt.Errorf("%s running %s but cli running %s", pod.Name, proxyVersion, version.Version)
 		}
 	}
@@ -2113,14 +2120,6 @@ func (hc *HealthChecker) getProxyInjectorMutatingWebhook(ctx context.Context) (*
 	return &mwc.Webhooks[0], nil
 }
 
-func (hc *HealthChecker) getMutatingWebhookFailurePolicy(ctx context.Context) (*admissionRegistration.FailurePolicyType, error) {
-	mwh, err := hc.getProxyInjectorMutatingWebhook(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return mwh.FailurePolicy, nil
-}
-
 func (hc *HealthChecker) checkMutatingWebhookConfigurations(ctx context.Context, shouldExist bool) error {
 	options := metav1.ListOptions{
 		LabelSelector: controlPlaneComponentsSelector(),
@@ -2161,7 +2160,7 @@ func (hc *HealthChecker) checkValidatingWebhookConfigurations(ctx context.Contex
 // installed on the cluster.
 func CheckCustomResourceDefinitions(ctx context.Context, k8sAPI *k8s.KubernetesAPI, expectedCRDManifests string) error {
 
-	crdYamls := strings.Split(expectedCRDManifests, "---\n")
+	crdYamls := strings.Split(expectedCRDManifests, "\n---\n")
 	crdVersions := []struct{ name, version string }{}
 	for _, crdYaml := range crdYamls {
 		var crd apiextv1.CustomResourceDefinition
@@ -2258,7 +2257,8 @@ func GetMeshedPodsIdentityData(ctx context.Context, api kubernetes.Interface, da
 	}
 	pods := []MeshedPodIdentityData{}
 	for _, pod := range podList.Items {
-		for _, containerSpec := range pod.Spec.Containers {
+		containers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+		for _, containerSpec := range containers {
 			if containerSpec.Name != k8s.ProxyContainerName {
 				continue
 			}
@@ -2369,7 +2369,7 @@ func (hc *HealthChecker) checkMisconfiguredOpaquePortAnnotations(ctx context.Con
 	// This is used instead of `hc.kubeAPI` to limit multiple k8s API requests
 	// and use the caching logic in the shared informers
 	// TODO: move the shared informer code out of `controller/`, and into `pkg` to simplify the dependency tree.
-	kubeAPI := controllerK8s.NewClusterScopedAPI(hc.kubeAPI, nil, nil, controllerK8s.Endpoint, controllerK8s.Pod, controllerK8s.Svc)
+	kubeAPI := controllerK8s.NewClusterScopedAPI(hc.kubeAPI, nil, nil, "local", controllerK8s.Endpoint, controllerK8s.Pod, controllerK8s.Svc)
 	kubeAPI.Sync(ctx.Done())
 
 	services, err := kubeAPI.Svc().Lister().Services(hc.DataPlaneNamespace).List(labels.Everything())
@@ -2403,7 +2403,7 @@ func (hc *HealthChecker) checkMisconfiguredOpaquePortAnnotations(ctx context.Con
 	}
 
 	if len(errStrings) >= 1 {
-		return fmt.Errorf(strings.Join(errStrings, "\n    "))
+		return errors.New(strings.Join(errStrings, "\n    "))
 	}
 
 	return nil
@@ -2584,20 +2584,6 @@ func (hc *HealthChecker) GetServices(ctx context.Context) ([]corev1.Service, err
 	return svcList.Items, nil
 }
 
-func (hc *HealthChecker) checkHAMetadataPresentOnKubeSystemNamespace(ctx context.Context) error {
-	ns, err := hc.kubeAPI.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	val, ok := ns.Labels[k8s.AdmissionWebhookLabel]
-	if !ok || val != "disabled" {
-		return fmt.Errorf("kube-system namespace needs to have the label %s: disabled if injector webhook failure policy is Fail", k8s.AdmissionWebhookLabel)
-	}
-
-	return nil
-}
-
 func (hc *HealthChecker) checkCanCreate(ctx context.Context, namespace, group, version, resource string) error {
 	return CheckCanPerformAction(ctx, hc.kubeAPI, "create", namespace, group, version, resource)
 }
@@ -2669,7 +2655,7 @@ func (hc *HealthChecker) checkExtensionAPIServerAuthentication(ctx context.Conte
 func (hc *HealthChecker) checkClockSkew(ctx context.Context) error {
 	if hc.kubeAPI == nil {
 		// we should never get here
-		return fmt.Errorf("unexpected error: Kubernetes ClientSet not initialized")
+		return errors.New("unexpected error: Kubernetes ClientSet not initialized")
 	}
 
 	var clockSkewNodes []string
@@ -2693,6 +2679,43 @@ func (hc *HealthChecker) checkClockSkew(ctx context.Context) error {
 
 	if len(clockSkewNodes) > 0 {
 		return fmt.Errorf("clock skew detected for node(s): %s", strings.Join(clockSkewNodes, ", "))
+	}
+
+	return nil
+}
+
+func (hc *HealthChecker) checkExtensionNsLabels(ctx context.Context) error {
+	if hc.kubeAPI == nil {
+		// oops something wrong happened
+		return errors.New("unexpected error: Kubernetes ClientSet not initialized")
+	}
+
+	namespaces, err := hc.kubeAPI.GetAllNamespacesWithExtensionLabel(ctx)
+	if err != nil {
+		return fmt.Errorf("unexpected error when retrieving namespaces: %w", err)
+	}
+
+	freq := make(map[string][]string)
+	for _, ns := range namespaces {
+		// We can guarantee the namespace has the extension label since we used
+		// a label selector when retrieving namespaces
+		ext := ns.Labels[k8s.LinkerdExtensionLabel]
+		// To make it easier to print, store already error-formatted namespace
+		// in freq table
+		freq[ext] = append(freq[ext], fmt.Sprintf("\t\t* %s", ns.Name))
+	}
+
+	errs := []string{}
+	for ext, namespaces := range freq {
+		if len(namespaces) == 1 {
+			continue
+		}
+		errs = append(errs, fmt.Sprintf("\t* label \"%s=%s\" is present on more than one namespace:\n%s", k8s.LinkerdExtensionLabel, ext, strings.Join(namespaces, "\n")))
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(
+			append([]string{"some extensions have invalid configuration"}, errs...), "\n"))
 	}
 
 	return nil
@@ -2883,7 +2906,7 @@ func CheckPodsRunning(pods []corev1.Pod, namespace string) error {
 		if namespace != "" {
 			msg += fmt.Sprintf(" in the \"%s\" namespace", namespace)
 		}
-		return fmt.Errorf(msg)
+		return errors.New(msg)
 	}
 	for _, pod := range pods {
 		status := k8s.GetPodStatus(pod)
@@ -2915,7 +2938,8 @@ func CheckIfDataPlanePodsExist(pods []corev1.Pod) error {
 }
 
 func containsProxy(pod corev1.Pod) bool {
-	for _, containerSpec := range pod.Spec.Containers {
+	containers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+	for _, containerSpec := range containers {
 		if containerSpec.Name == k8s.ProxyContainerName {
 			return true
 		}

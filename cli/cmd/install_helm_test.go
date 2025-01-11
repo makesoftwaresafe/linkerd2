@@ -35,6 +35,16 @@ func TestRenderHelm(t *testing.T) {
 		testRenderHelm(t, chartControlPlane, "install_helm_control_plane_output_ha.golden")
 	})
 
+	t.Run("HA mode with GID", func(t *testing.T) {
+		additionalConfig := `
+controllerGID: 1324
+proxy:
+  gid: 4231
+`
+		chartControlPlane := chartControlPlane(t, true, additionalConfig, "111", "222")
+		testRenderHelm(t, chartControlPlane, "install_helm_control_plane_output_ha_with_gid.golden")
+	})
+
 	t.Run("HA mode with podLabels and podAnnotations", func(t *testing.T) {
 		additionalConfig := `
 podLabels:
@@ -220,7 +230,7 @@ func chartCrds(t *testing.T) *chart.Chart {
 
 	linkerd2Chart.AddDependency(chartPartials)
 
-	for _, filepath := range templatesCrdFiles {
+	for _, filepath := range TemplatesCrdFiles {
 		linkerd2Chart.Templates = append(linkerd2Chart.Templates, &chart.File{
 			Name: filepath,
 		})
@@ -287,7 +297,7 @@ func chartControlPlane(t *testing.T, ha bool, additionalConfig string, ignoreOut
 
 	linkerd2Chart.AddDependency(chartPartials)
 
-	for _, filepath := range templatesControlPlane {
+	for _, filepath := range TemplatesControlPlane {
 		linkerd2Chart.Templates = append(linkerd2Chart.Templates, &chart.File{
 			Name: filepath,
 		})

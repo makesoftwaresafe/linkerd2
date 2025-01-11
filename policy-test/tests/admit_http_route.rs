@@ -1,5 +1,5 @@
 use linkerd_policy_controller_k8s_api::{self as api, policy::httproute::*};
-use linkerd_policy_test::admission;
+use linkerd_policy_test::{admission, egress_network_parent_ref};
 
 #[tokio::test(flavor = "current_thread")]
 async fn accepts_valid() {
@@ -22,12 +22,16 @@ async fn accepts_valid() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rejects_non_server_parent_ref() {
-    admission::rejects(|ns| HttpRoute {
-        metadata: meta(&ns),
+async fn accepts_valid_egress_network() {
+    admission::accepts(|ns| HttpRoute {
+        metadata: api::ObjectMeta {
+            namespace: Some(ns.clone()),
+            name: Some("test".to_string()),
+            ..Default::default()
+        },
         spec: HttpRouteSpec {
             inner: CommonRouteSpec {
-                parent_refs: Some(vec![non_server_parent_ref(ns)]),
+                parent_refs: Some(vec![egress_network_parent_ref(ns, Some(555))]),
             },
             hostnames: None,
             rules: Some(rules()),
@@ -37,15 +41,17 @@ async fn rejects_non_server_parent_ref() {
     .await;
 }
 
-/// Tests that an `HTTPRoute` is rejected if it contains *any* parent refs that
-/// target non-`Server` resources, even if it also targets a `Server` resource.
 #[tokio::test(flavor = "current_thread")]
-async fn rejects_mixed_parent_ref() {
+async fn rejects_egress_network_parent_with_no_port() {
     admission::rejects(|ns| HttpRoute {
-        metadata: meta(&ns),
+        metadata: api::ObjectMeta {
+            namespace: Some(ns.clone()),
+            name: Some("test".to_string()),
+            ..Default::default()
+        },
         spec: HttpRouteSpec {
             inner: CommonRouteSpec {
-                parent_refs: Some(vec![server_parent_ref(&ns), non_server_parent_ref(ns)]),
+                parent_refs: Some(vec![egress_network_parent_ref(ns, None)]),
             },
             hostnames: None,
             rules: Some(rules()),
@@ -72,6 +78,8 @@ async fn rejects_relative_path_match() {
                     ..HttpRouteMatch::default()
                 }]),
                 filters: None,
+                backend_refs: None,
+                timeouts: None,
             }]),
         },
         status: None,
@@ -99,11 +107,15 @@ async fn rejects_relative_redirect_path() {
                     request_redirect: HttpRequestRedirectFilter {
                         scheme: None,
                         hostname: None,
-                        path: Some(HttpPathModifier::ReplaceFullPath("foo/bar".to_string())),
+                        path: Some(HttpPathModifier::ReplaceFullPath {
+                            replace_full_path: "foo/bar".to_string(),
+                        }),
                         port: None,
                         status_code: None,
                     },
                 }]),
+                backend_refs: None,
+                timeouts: None,
             }]),
         },
         status: None,
@@ -117,17 +129,6 @@ fn server_parent_ref(ns: impl ToString) -> ParentReference {
         kind: Some("Server".to_string()),
         namespace: Some(ns.to_string()),
         name: "my-server".to_string(),
-        section_name: None,
-        port: None,
-    }
-}
-
-fn non_server_parent_ref(ns: impl ToString) -> ParentReference {
-    ParentReference {
-        group: Some("foo.bar.bas".to_string()),
-        kind: Some("Gateway".to_string()),
-        namespace: Some(ns.to_string()),
-        name: "my-gateway".to_string(),
         section_name: None,
         port: None,
     }
@@ -150,5 +151,7 @@ fn rules() -> Vec<HttpRouteRule> {
             ..HttpRouteMatch::default()
         }]),
         filters: None,
+        backend_refs: None,
+        timeouts: None,
     }]
 }

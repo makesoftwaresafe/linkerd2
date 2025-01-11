@@ -360,6 +360,7 @@ metadata:
   namespace: linkerd-viz
 spec:
   replicas: 1
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
       linkerd.io/extension: viz
@@ -379,6 +380,7 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
       
+      automountServiceAccountToken: false
       containers:
       - args:
         - -controller-namespace=linkerd
@@ -414,14 +416,38 @@ spec:
           runAsNonRoot: true
           readOnlyRootFilesystem: true
           runAsUser: 2103
+          runAsGroup: 2103
           seccompProfile:
             type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: kube-api-access
+          readOnly: true
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: metrics-api
+      volumes:
+      - name: kube-api-access
+        projected:
+          defaultMode: 420
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3607
+              path: token
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: kube-root-ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
 ---
-apiVersion: policy.linkerd.io/v1beta1
+apiVersion: policy.linkerd.io/v1beta3
 kind: Server
 metadata:
   namespace: linkerd-viz
@@ -474,7 +500,23 @@ spec:
   - kind: ServiceAccount
     name: web
 ---
-apiVersion: policy.linkerd.io/v1beta1
+apiVersion: policy.linkerd.io/v1alpha1
+kind: NetworkAuthentication
+metadata:
+  namespace: linkerd-viz
+  name: kubelet
+  labels:
+    linkerd.io/extension: viz
+  annotations:
+    linkerd.io/created-by: linkerd/helm dev-undefined
+spec:
+  # Ideally, this should be restricted to the actual set of IPs kubelet uses in
+  # a cluster. This can't easily be discovered.
+  networks:
+  - cidr: "0.0.0.0/0"
+  - cidr: "::/0"
+---
+apiVersion: policy.linkerd.io/v1beta3
 kind: Server
 metadata:
   namespace: linkerd-viz
@@ -557,6 +599,7 @@ metadata:
   namespace: linkerd-viz
 spec:
   replicas: 1
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
       linkerd.io/extension: viz
@@ -578,6 +621,7 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
       
+      automountServiceAccountToken: false
       containers:
       - args:
         - api
@@ -615,11 +659,15 @@ spec:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 2103
+          runAsGroup: 2103
           seccompProfile:
             type: RuntimeDefault
         volumeMounts:
         - mountPath: /var/run/linkerd/tls
           name: tls
+          readOnly: true
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: kube-api-access
           readOnly: true
       securityContext:
         seccompProfile:
@@ -629,8 +677,26 @@ spec:
       - name: tls
         secret:
           secretName: tap-k8s-tls
+      - name: kube-api-access
+        projected:
+          defaultMode: 420
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3607
+              path: token
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: kube-root-ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
 ---
-apiVersion: policy.linkerd.io/v1beta1
+apiVersion: policy.linkerd.io/v1beta3
 kind: Server
 metadata:
   namespace: linkerd-viz
@@ -713,6 +779,12 @@ metadata:
     linkerd.io/extension: viz
 webhooks:
 - name: tap-injector.linkerd.io
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - kube-system
   clientConfig:
     service:
       name: tap-injector
@@ -727,6 +799,7 @@ webhooks:
     apiGroups: [""]
     apiVersions: ["v1"]
     resources: ["pods"]
+    scope: "Namespaced"
   sideEffects: None
 ---
 ###
@@ -769,13 +842,14 @@ metadata:
   namespace: linkerd-viz
 spec:
   replicas: 1
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
       component: tap-injector
   template:
     metadata:
       annotations:
-        checksum/config: 390143015ec83a86ded6630634da5834c8ac7700b93d486a7dc101a15cb87f15
+        checksum/config: f46683697f33ac5449b952d1d037718887c4f98421d0f4133bb19e1c873a925d
         linkerd.io/created-by: linkerd/helm dev-undefined
         linkerd.io/inject: enabled
         config.alpha.linkerd.io/proxy-wait-before-exit-seconds: "0"
@@ -787,6 +861,7 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
       
+      automountServiceAccountToken: false
       containers:
       - args:
         - injector
@@ -821,11 +896,15 @@ spec:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 2103
+          runAsGroup: 2103
           seccompProfile:
             type: RuntimeDefault
         volumeMounts:
         - mountPath: /var/run/linkerd/tls
           name: tls
+          readOnly: true
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: kube-api-access
           readOnly: true
       securityContext:
         seccompProfile:
@@ -835,8 +914,26 @@ spec:
       - name: tls
         secret:
           secretName: tap-injector-k8s-tls
+      - name: kube-api-access
+        projected:
+          defaultMode: 420
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3607
+              path: token
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: kube-root-ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
 ---
-apiVersion: policy.linkerd.io/v1beta1
+apiVersion: policy.linkerd.io/v1beta3
 kind: Server
 metadata:
   namespace: linkerd-viz
@@ -904,6 +1001,7 @@ metadata:
     namespace: linkerd-viz
   annotations:
     linkerd.io/created-by: linkerd/helm dev-undefined
+    
     linkerd.io/inject: enabled
 spec:
   type: ClusterIP
@@ -936,6 +1034,7 @@ metadata:
   namespace: linkerd-viz
 spec:
   replicas: 1
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
       linkerd.io/extension: viz
@@ -955,6 +1054,8 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/os: linux
+      
+      automountServiceAccountToken: false
       containers:
       - args:
         - -linkerd-metrics-api-addr=metrics-api.linkerd-viz.svc.cluster.local:8085
@@ -991,12 +1092,36 @@ spec:
           readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 2103
+          runAsGroup: 2103
           seccompProfile:
             type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: kube-api-access
+          readOnly: true
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: web
+      volumes:
+      - name: kube-api-access
+        projected:
+          defaultMode: 420
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3607
+              path: token
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: kube-root-ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
 ---
 apiVersion: linkerd.io/v1alpha2
 kind: ServiceProfile
