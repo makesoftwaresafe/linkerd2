@@ -1,9 +1,10 @@
+{{- if .Values.createNamespaceMetadataJob}}
 kind: ServiceAccount
 apiVersion: v1
 metadata:
-  {{- with .Values.commonLabels }}
-  labels: {{ toYaml . | trim | nindent 4 }}
-  {{- end }}
+  labels:
+    linkerd.io/extension: multicluster
+    {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" . }}
     "helm.sh/hook": post-install
@@ -11,13 +12,14 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
   name: namespace-metadata
   namespace: {{.Release.Namespace}}
+{{- include "partials.image-pull-secrets" .Values.imagePullSecrets }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  {{- with .Values.commonLabels }}
-  labels: {{ toYaml . | trim | nindent 4 }}
-  {{- end }}
+  labels:
+    linkerd.io/extension: multicluster
+    {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" . }}
     "helm.sh/hook": post-install
@@ -34,9 +36,9 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  {{- with .Values.commonLabels }}
-  labels: {{ toYaml . | trim | nindent 4 }}
-  {{- end }}
+  labels:
+    linkerd.io/extension: multicluster
+    {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" . }}
     "helm.sh/hook": post-install
@@ -57,9 +59,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   namespace: {{ .Values.linkerdNamespace }}
-  {{- with .Values.commonLabels }}
-  labels: {{ toYaml . | trim | nindent 4 }}
-  {{- end }}
+  labels:
+    linkerd.io/extension: multicluster
+    {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" . }}
     "helm.sh/hook": post-install
@@ -74,3 +76,4 @@ subjects:
 - kind: ServiceAccount
   name: namespace-metadata
   namespace: {{.Release.Namespace}}
+{{- end }}

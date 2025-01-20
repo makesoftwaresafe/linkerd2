@@ -18,6 +18,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{.Values.gateway.replicas}}
+  revisionHistoryLimit: {{.Values.revisionHistoryLimit}}
   selector:
     matchLabels:
       app: {{.Values.gateway.name}}
@@ -38,6 +39,7 @@ spec:
         {{- with .Values.gateway.deploymentAnnotations }}{{ toYaml . | trim | nindent 8 }}{{- end }}
       labels:
         app: {{.Values.gateway.name}}
+        linkerd.io/extension: multicluster
         {{- with .Values.podLabels }}{{ toYaml . | trim | nindent 8 }}{{- end }}
     spec:
       {{- $_ := set $tree "component" .Values.gateway.name -}}
@@ -46,18 +48,21 @@ spec:
       {{- if .Values.gateway.terminationGracePeriodSeconds }}
       terminationGracePeriodSeconds: {{.Values.gateway.terminationGracePeriodSeconds}}
       {{- end }}
+      automountServiceAccountToken: false
       containers:
-        - name: pause
-          image: {{ .Values.gateway.pauseImage }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-            runAsNonRoot: true
-            runAsUser: {{.Values.gateway.UID}}
-            seccompProfile:
-              type: RuntimeDefault
+      - name: pause
+        image: {{ .Values.gateway.pauseImage }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: {{.Values.gateway.UID}}
+          runAsGroup: {{.Values.gateway.GID}}
+          seccompProfile:
+            type: RuntimeDefault
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -77,6 +82,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{.Values.gateway.name}}
+    linkerd.io/extension: multicluster
     {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" . }}
@@ -121,6 +127,12 @@ spec:
   selector:
     app: {{.Values.gateway.name}}
   type: {{ .Values.gateway.serviceType }}
+{{- with .Values.gateway.serviceExternalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+{{- end }}
+{{- if .Values.gateway.loadBalancerClass }}
+  loadBalancerClass: {{ .Values.gateway.loadBalancerClass }}
+{{- end }}
 {{- if .Values.gateway.loadBalancerIP }}
   loadBalancerIP: {{ .Values.gateway.loadBalancerIP }}
 {{- end }}
@@ -139,4 +151,5 @@ metadata:
   labels:
     linkerd.io/extension: multicluster
     {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
+{{- include "partials.image-pull-secrets" .Values.imagePullSecrets }}
 {{end -}}

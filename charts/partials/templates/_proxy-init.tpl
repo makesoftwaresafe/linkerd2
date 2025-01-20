@@ -7,6 +7,9 @@ args:
 - "iptables-nft-save"
 {{- else if not (eq .Values.proxyInit.iptablesMode "legacy") }}
 {{ fail (printf "Unsupported value \"%s\" for proxyInit.iptablesMode\nValid values: [\"nft\", \"legacy\"]" .Values.proxyInit.iptablesMode) }}
+{{end -}}
+{{- if .Values.disableIPv6 }}
+- --ipv6=false
 {{- end }}
 - --incoming-proxy-port
 - {{.Values.proxy.ports.inbound | quote}}
@@ -14,6 +17,10 @@ args:
 - {{.Values.proxy.ports.outbound | quote}}
 - --proxy-uid
 - {{.Values.proxy.uid | quote}}
+{{- if ge (int .Values.proxy.gid) 0 }}
+- --proxy-gid
+- {{.Values.proxy.gid | quote}}
+{{- end }}
 - --inbound-ports-to-ignore
 - "{{.Values.proxy.ports.control}},{{.Values.proxy.ports.admin}}{{ternary (printf ",%s" (.Values.proxyInit.ignoreInboundPorts | toString)) "" (not (empty .Values.proxyInit.ignoreInboundPorts)) }}"
 {{- if .Values.proxyInit.ignoreOutboundPorts }}
@@ -21,6 +28,9 @@ args:
 - {{.Values.proxyInit.ignoreOutboundPorts | quote}}
 {{- end }}
 {{- if .Values.proxyInit.closeWaitTimeoutSecs }}
+  {{- if not .Values.proxyInit.runAsRoot }}
+{{ fail "proxyInit.runAsRoot must be set to use proxyInit.closeWaitTimeoutSecs" }}
+  {{- end }}
 - --timeout-close-wait-secs
 - {{ .Values.proxyInit.closeWaitTimeoutSecs | quote}}
 {{- end }}
@@ -39,7 +49,7 @@ args:
 image: {{.Values.proxyInit.image.name}}:{{.Values.proxyInit.image.version}}
 imagePullPolicy: {{.Values.proxyInit.image.pullPolicy | default .Values.imagePullPolicy}}
 name: linkerd-init
-{{ include "partials.resources" .Values.proxyInit.resources }}
+{{ include "partials.resources" .Values.proxy.resources }}
 securityContext:
   {{- if or .Values.proxyInit.closeWaitTimeoutSecs .Values.proxyInit.privileged }}
   allowPrivilegeEscalation: true
@@ -64,11 +74,13 @@ securityContext:
   privileged: false
   {{- end }}
   {{- if .Values.proxyInit.runAsRoot }}
+  runAsGroup: 0
   runAsNonRoot: false
   runAsUser: 0
   {{- else }}
   runAsNonRoot: true
   runAsUser: {{ .Values.proxyInit.runAsUser | int | eq 0 | ternary 65534 .Values.proxyInit.runAsUser }}
+  runAsGroup: {{ .Values.proxyInit.runAsGroup | int | eq 0 | ternary 65534 .Values.proxyInit.runAsGroup }}
   {{- end }}
   readOnlyRootFilesystem: true
   seccompProfile:

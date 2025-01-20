@@ -2,13 +2,19 @@ package destination
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	pb "github.com/linkerd/linkerd2-proxy-api/go/destination"
 	"github.com/linkerd/linkerd2/controller/api/destination"
+	externalworkload "github.com/linkerd/linkerd2/controller/api/destination/external-workload"
+	"github.com/linkerd/linkerd2/controller/api/destination/watcher"
 	"github.com/linkerd/linkerd2/controller/k8s"
 	"github.com/linkerd/linkerd2/pkg/admin"
 	"github.com/linkerd/linkerd2/pkg/flags"
@@ -25,17 +31,50 @@ func Main(args []string) {
 	addr := cmd.String("addr", ":8086", "address to serve on")
 	metricsAddr := cmd.String("metrics-addr", ":9996", "address to serve scrapable metrics on")
 	kubeConfigPath := cmd.String("kubeconfig", "", "path to kube config")
-	enableH2Upgrade := cmd.Bool("enable-h2-upgrade", true, "Enable transparently upgraded HTTP2 connections among pods in the service mesh")
 	controllerNamespace := cmd.String("controller-namespace", "linkerd", "namespace in which Linkerd is installed")
-	enableEndpointSlices := cmd.Bool("enable-endpoint-slices", true, "Enable the usage of EndpointSlice informers and resources")
+	enableH2Upgrade := cmd.Bool("enable-h2-upgrade", true,
+		"Enable transparently upgraded HTTP2 connections among pods in the service mesh")
+	enableEndpointSlices := cmd.Bool("enable-endpoint-slices", true,
+		"Enable the usage of EndpointSlice informers and resources")
+	enableIPv6 := cmd.Bool("enable-ipv6", true,
+		"Set to true to allow discovering IPv6 endpoints and preferring IPv6 when both IPv4 and IPv6 are available")
 	trustDomain := cmd.String("identity-trust-domain", "", "configures the name suffix used for identities")
 	clusterDomain := cmd.String("cluster-domain", "", "kubernetes cluster domain")
 	defaultOpaquePorts := cmd.String("default-opaque-ports", "", "configures the default opaque ports")
 	enablePprof := cmd.Bool("enable-pprof", false, "Enable pprof endpoints on the admin server")
+	// This will default to true. It can be overridden with experimental CLI
+	// flags. Currently not exposed as a configuration value through Helm.
+	exportControllerQueueMetrics := cmd.Bool("export-queue-metrics", true, "Exports queue metrics for the external workload controller")
 
 	traceCollector := flags.AddTraceFlags(cmd)
 
+	// Zone weighting is disabled by default because it is not consumed by
+	// proxies. This feature exists to support experimentation on top of the
+	// Linkerd control plane API.
+	extEndpointZoneWeights := cmd.Bool("ext-endpoint-zone-weights", false,
+		"Enable setting endpoint weighting based on zone locality")
+
+	// Cluster-wide defaults for meshed HTTP/2 client parameters.. These only
+	// apply to meshed connections, as we don't want to conflict with HTTP/2
+	// servers that enforce policies that limit client keep-alive behavior. The
+	// inbound proxy does not enforce such policies, so we're free to use
+	// defaults for meshed HTTP/2 connections.
+	meshedHTTP2ClientParamsJSON := cmd.String("meshed-http2-client-params", "",
+		"HTTP/2 client parameters for meshed connections in JSON format")
+
 	flags.ConfigureAndParse(cmd, args)
+
+	if *enableIPv6 && !*enableEndpointSlices {
+		log.Fatal("If --enable-ipv6=true then --enable-endpoint-slices needs to be true")
+	}
+
+	var meshedHTTP2ClientParams *pb.Http2ClientParams
+	if meshedHTTP2ClientParamsJSON != nil && *meshedHTTP2ClientParamsJSON != "" {
+		meshedHTTP2ClientParams = &pb.Http2ClientParams{}
+		if err := json.Unmarshal([]byte(*meshedHTTP2ClientParamsJSON), meshedHTTP2ClientParams); err != nil {
+			log.Fatalf("Failed to parse meshed HTTP/2 client parameters: %s", err)
+		}
+	}
 
 	ready := false
 	adminServer := admin.NewServer(*metricsAddr, *enablePprof, &ready)
@@ -43,7 +82,11 @@ func Main(args []string) {
 	go func() {
 		log.Infof("starting admin server on %s", *metricsAddr)
 		if err := adminServer.ListenAndServe(); err != nil {
-			log.Errorf("failed to start destination admin server: %s", err)
+			if errors.Is(err, http.ErrServerClosed) {
+				log.Infof("Admin server closed (%s)", *metricsAddr)
+			} else {
+				log.Errorf("Admin server error (%s): %s", *metricsAddr, err)
+			}
 		}
 	}()
 
@@ -67,10 +110,7 @@ func Main(args []string) {
 		log.Warnf("expected cluster domain through args (falling back to %s)", *clusterDomain)
 	}
 
-	opaquePorts, err := util.ParsePorts(*defaultOpaquePorts)
-	if err != nil {
-		log.Fatalf("Failed to parse opaque Ports %s: %s", *defaultOpaquePorts, err)
-	}
+	opaquePorts := util.ParsePorts(*defaultOpaquePorts)
 
 	log.Infof("Using default opaque ports: %v", opaquePorts)
 
@@ -100,35 +140,49 @@ func Main(args []string) {
 			ctx,
 			*kubeConfigPath,
 			true,
-			k8s.Endpoint, k8s.ES, k8s.Pod, k8s.Svc, k8s.SP, k8s.Job, k8s.Srv,
+			"local",
+			k8s.Endpoint, k8s.ES, k8s.Pod, k8s.Svc, k8s.SP, k8s.Job, k8s.Srv, k8s.ExtWorkload,
 		)
 	} else {
 		k8sAPI, err = k8s.InitializeAPI(
 			ctx,
 			*kubeConfigPath,
 			true,
-			k8s.Endpoint, k8s.Pod, k8s.Svc, k8s.SP, k8s.Job, k8s.Srv,
+			"local",
+			k8s.Endpoint, k8s.Pod, k8s.Svc, k8s.SP, k8s.Job, k8s.Srv, k8s.ExtWorkload,
 		)
 	}
 	if err != nil {
 		log.Fatalf("Failed to initialize K8s API: %s", err)
 	}
 
-	metadataAPI, err := k8s.InitializeMetadataAPI(*kubeConfigPath, k8s.Node, k8s.RS)
+	metadataAPI, err := k8s.InitializeMetadataAPI(*kubeConfigPath, "local", k8s.Node, k8s.RS, k8s.Job)
 	if err != nil {
 		log.Fatalf("Failed to initialize Kubernetes metadata API: %s", err)
 	}
 
+	clusterStore, err := watcher.NewClusterStore(k8Client, *controllerNamespace, *enableEndpointSlices)
+	if err != nil {
+		log.Fatalf("Failed to initialize Cluster Store: %s", err)
+	}
+
+	config := destination.Config{
+		ControllerNS:            *controllerNamespace,
+		IdentityTrustDomain:     *trustDomain,
+		ClusterDomain:           *clusterDomain,
+		DefaultOpaquePorts:      opaquePorts,
+		EnableH2Upgrade:         *enableH2Upgrade,
+		EnableEndpointSlices:    *enableEndpointSlices,
+		EnableIPv6:              *enableIPv6,
+		ExtEndpointZoneWeights:  *extEndpointZoneWeights,
+		MeshedHttp2ClientParams: meshedHTTP2ClientParams,
+	}
 	server, err := destination.NewServer(
 		*addr,
-		*controllerNamespace,
-		*trustDomain,
-		*enableH2Upgrade,
-		*enableEndpointSlices,
+		config,
 		k8sAPI,
 		metadataAPI,
-		*clusterDomain,
-		opaquePorts,
+		clusterStore,
 		done,
 	)
 
@@ -139,6 +193,22 @@ func Main(args []string) {
 	// blocks until caches are synced
 	k8sAPI.Sync(nil)
 	metadataAPI.Sync(nil)
+	clusterStore.Sync(nil)
+
+	// Start mesh expansion external workload controller to write endpointslices
+	// to API Server.
+	if *enableEndpointSlices {
+		hostname, ok := os.LookupEnv("HOSTNAME")
+		if !ok {
+			log.Fatal("Failed to initialize External Workload Endpoints Controller, \"HOSTNAME\" value not found")
+		}
+		externalWorkloadController, err := externalworkload.NewEndpointsController(k8sAPI, hostname, *controllerNamespace, done, *exportControllerQueueMetrics)
+		if err != nil {
+			log.Fatalf("Failed to initialize External Workload Endpoints Controller: %v", err)
+		}
+
+		externalWorkloadController.Start()
+	}
 
 	go func() {
 		log.Infof("starting gRPC server on %s", *addr)

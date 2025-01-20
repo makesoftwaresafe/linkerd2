@@ -14,21 +14,31 @@ permissions:
 
 jobs:
   rust-version:
-    runs-on: ubuntu-latest
-    container: ghcr.io/linkerd/dev:v39-rust
+    runs-on: ubuntu-24.04
+    container: ghcr.io/linkerd/dev:v45-rust
     steps:
-      - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
-      - run: |
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - shell: bash
+        run: |
+          # Extract current Rust version from the toolchain file.
+          version_regex='channel = "([0-9]+\.[0-9]+\.[0-9]+)"'
+          toolchain=$(cat rust-toolchain.toml)
+          if [[ $toolchain =~ $version_regex ]]; then
+            tc=${BASH_REMATCH[1]}
+          else
+            echo "::error file=rust-toolchain.toml::failed to parse rust-toolchain.toml"
+            exit 1
+          fi
+
           dev=$(cargo version | cut -d' ' -f2)
-          tc=$(cat rust-toolchain)
           if [ "$dev" != "$tc" ]; then
-            echo "::error file=rust-toolchain,line=1::rust-toolchain ($tc) does not match devcontainer ($dev)"
+            echo "::error file=rust-toolchain.toml,line=2::rust-toolchain ($tc) does not match devcontainer ($dev)"
             exit 1
           fi
 
   devcontainer-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: linkerd/dev/actions/setup-tools@v39
-      - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+      - uses: linkerd/dev/actions/setup-tools@v45
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - run: just-dev pull-dev-image

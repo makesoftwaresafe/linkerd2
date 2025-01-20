@@ -52,19 +52,30 @@ spec:
               type: RuntimeDefault
           serviceAccountName: linkerd-heartbeat
           restartPolicy: Never
+          automountServiceAccountToken: false
           containers:
           - name: heartbeat
-            image: {{.Values.controllerImage}}:{{.Values.linkerdVersion}}
+            image: {{.Values.controllerImage}}:{{.Values.controllerImageVersion | default .Values.linkerdVersion}}
             imagePullPolicy: {{.Values.imagePullPolicy}}
             env:
             - name: LINKERD_DISABLED
               value: "the heartbeat controller does not use the proxy"
+            {{- with (.Values.heartbeat).additionalEnv }}
+            {{- toYaml . | nindent 12 -}}
+            {{- end }}
+            {{- with (.Values.heartbeat).experimentalEnv }}
+            {{- toYaml . | nindent 12 -}}
+            {{- end }}
             args:
             - "heartbeat"
             - "-controller-namespace={{.Release.Namespace}}"
             - "-log-level={{.Values.controllerLogLevel}}"
             - "-log-format={{.Values.controllerLogFormat}}"
+            {{- if .Values.prometheusUrl }}
+            - "-prometheus-url={{.Values.prometheusUrl}}"
+            {{- else }}
             - "-prometheus-url=http://prometheus.linkerd-viz.svc.{{.Values.clusterDomain}}:9090"
+            {{- end }}
             {{- if .Values.heartbeatResources -}}
             {{- include "partials.resources" .Values.heartbeatResources | nindent 12 }}
             {{- end }}
@@ -72,9 +83,19 @@ spec:
               capabilities:
                 drop:
                 - ALL
+              readOnlyRootFilesystem: true
               runAsNonRoot: true
               runAsUser: {{.Values.controllerUID}}
+              {{- if ge (int .Values.controllerGID) 0 }}
+              runAsGroup: {{.Values.controllerGID}}
+              {{- end }}
               allowPrivilegeEscalation: false
               seccompProfile:
                 type: RuntimeDefault
+            volumeMounts:
+            - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              name: kube-api-access
+              readOnly: true
+          volumes:
+          - {{- include "partials.volumes.manual-mount-service-account-token" . | indent 12 | trimPrefix (repeat 11 " ") }}
 {{- end }}

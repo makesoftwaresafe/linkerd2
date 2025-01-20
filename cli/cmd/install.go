@@ -16,6 +16,7 @@ import (
 	"github.com/linkerd/linkerd2/pkg/charts"
 	l5dcharts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	"github.com/linkerd/linkerd2/pkg/charts/static"
+	pkgcmd "github.com/linkerd/linkerd2/pkg/cmd"
 	flagspkg "github.com/linkerd/linkerd2/pkg/flags"
 	"github.com/linkerd/linkerd2/pkg/healthcheck"
 	"github.com/linkerd/linkerd2/pkg/k8s"
@@ -40,23 +41,31 @@ const (
 
 %s
 
-You can use the --ignore-cluster flag if you just want to generate the installation config.`
+You can use the --ignore-cluster flag if you just want to generate the installation config.
+`
 
 	errMsgLinkerdConfigResourceConflict = "Can't install the Linkerd control plane in the '%s' namespace. Reason: %s.\nRun the command `linkerd upgrade`, if you are looking to upgrade Linkerd.\n"
 )
 
 var (
-	templatesCrdFiles = []string{
+	TemplatesCrdFiles = []string{
 		"templates/policy/authorization-policy.yaml",
+		"templates/policy/egress-network.yaml",
+		"templates/policy/http-local-ratelimit-policy.yaml",
 		"templates/policy/httproute.yaml",
 		"templates/policy/meshtls-authentication.yaml",
 		"templates/policy/network-authentication.yaml",
 		"templates/policy/server-authorization.yaml",
 		"templates/policy/server.yaml",
 		"templates/serviceprofile.yaml",
+		"templates/gateway.networking.k8s.io_httproutes.yaml",
+		"templates/gateway.networking.k8s.io_grpcroutes.yaml",
+		"templates/gateway.networking.k8s.io_tlsroutes.yaml",
+		"templates/gateway.networking.k8s.io_tcproutes.yaml",
+		"templates/workload/external-workload.yaml",
 	}
 
-	templatesControlPlane = []string{
+	TemplatesControlPlane = []string{
 		"templates/namespace.yaml",
 		"templates/identity-rbac.yaml",
 		"templates/destination-rbac.yaml",
@@ -84,6 +93,7 @@ func newCmdInstall() *cobra.Command {
 	}
 	var crds bool
 	var options valuespkg.Options
+	var output string
 
 	installOnlyFlags, installOnlyFlagSet := makeInstallFlags(values)
 	installUpgradeFlags, installUpgradeFlagSet, err := makeInstallUpgradeFlags(values)
@@ -128,7 +138,7 @@ A full list of configurable values can be found at https://artifacthub.io/packag
 
 				if !crds {
 					crds := bytes.Buffer{}
-					err := renderCRDs(&crds, options)
+					err := renderCRDs(&crds, options, "yaml")
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "%q", err)
 						os.Exit(1)
@@ -144,7 +154,7 @@ A full list of configurable values can be found at https://artifacthub.io/packag
 			if crds {
 				// The CRD chart is not configurable.
 				// TODO(ver): Error if values have been configured?
-				if err = installCRDs(cmd.Context(), k8sAPI, os.Stdout, options); err != nil {
+				if err = installCRDs(cmd.Context(), k8sAPI, os.Stdout, options, output); err != nil {
 					return err
 				}
 
@@ -154,7 +164,7 @@ A full list of configurable values can be found at https://artifacthub.io/packag
 				return nil
 			}
 
-			return installControlPlane(cmd.Context(), k8sAPI, os.Stdout, values, flags, options)
+			return installControlPlane(cmd.Context(), k8sAPI, os.Stdout, values, flags, options, output)
 		},
 	}
 
@@ -164,6 +174,7 @@ A full list of configurable values can be found at https://artifacthub.io/packag
 	cmd.Flags().BoolVar(&crds, "crds", false, "Install Linkerd CRDs")
 	cmd.PersistentFlags().BoolVar(&ignoreCluster, "ignore-cluster", false,
 		"Ignore the current Kubernetes cluster when checking for existing cluster configuration (default false)")
+	cmd.PersistentFlags().StringVarP(&output, "output", "o", "yaml", "Output format. One of: json|yaml")
 
 	flagspkg.AddValueOptionsFlags(cmd.Flags(), &options)
 
@@ -189,15 +200,15 @@ func checkNoConfig(ctx context.Context, k8sAPI *k8s.KubernetesAPI) error {
 	return nil
 }
 
-func installCRDs(ctx context.Context, k8sAPI *k8s.KubernetesAPI, w io.Writer, options valuespkg.Options) error {
+func installCRDs(ctx context.Context, k8sAPI *k8s.KubernetesAPI, w io.Writer, options valuespkg.Options, format string) error {
 	if err := checkNoConfig(ctx, k8sAPI); err != nil {
 		return err
 	}
 
-	return renderCRDs(w, options)
+	return renderCRDs(w, options, format)
 }
 
-func installControlPlane(ctx context.Context, k8sAPI *k8s.KubernetesAPI, w io.Writer, values *l5dcharts.Values, flags []flag.Flag, options valuespkg.Options) error {
+func installControlPlane(ctx context.Context, k8sAPI *k8s.KubernetesAPI, w io.Writer, values *l5dcharts.Values, flags []flag.Flag, options valuespkg.Options, format string) error {
 	err := flag.ApplySetFlags(values, flags)
 	if err != nil {
 		return err
@@ -251,7 +262,7 @@ func installControlPlane(ctx context.Context, k8sAPI *k8s.KubernetesAPI, w io.Wr
 		return err
 	}
 
-	return renderControlPlane(w, values, valuesOverrides)
+	return renderControlPlane(w, values, valuesOverrides, format)
 }
 
 func isRunAsRoot(values map[string]interface{}) bool {
@@ -316,11 +327,11 @@ func renderChartToBuffer(files []*loader.BufferedFile, values map[string]interfa
 	return &buf, vals, nil
 }
 
-func renderCRDs(w io.Writer, options valuespkg.Options) error {
+func renderCRDs(w io.Writer, options valuespkg.Options, format string) error {
 	files := []*loader.BufferedFile{
 		{Name: chartutil.ChartfileName},
 	}
-	for _, template := range templatesCrdFiles {
+	for _, template := range TemplatesCrdFiles {
 		files = append(files, &loader.BufferedFile{Name: template})
 	}
 	if err := charts.FilesReader(static.Templates, l5dcharts.HelmChartDirCrds+"/", files); err != nil {
@@ -354,15 +365,14 @@ func renderCRDs(w io.Writer, options valuespkg.Options) error {
 		return err
 	}
 
-	_, err = w.Write(buf.Bytes())
-	return err
+	return pkgcmd.RenderYAMLAs(buf, w, format)
 }
 
-func renderControlPlane(w io.Writer, values *l5dcharts.Values, valuesOverrides map[string]interface{}) error {
+func renderControlPlane(w io.Writer, values *l5dcharts.Values, valuesOverrides map[string]interface{}, format string) error {
 	files := []*loader.BufferedFile{
 		{Name: chartutil.ChartfileName},
 	}
-	for _, template := range templatesControlPlane {
+	for _, template := range TemplatesControlPlane {
 		files = append(files, &loader.BufferedFile{Name: template})
 	}
 	if err := charts.FilesReader(static.Templates, l5dcharts.HelmChartDirCP+"/", files); err != nil {
@@ -385,8 +395,7 @@ func renderControlPlane(w io.Writer, values *l5dcharts.Values, valuesOverrides m
 	buf.WriteString(yamlSep)
 	buf.WriteString(string(overrides))
 
-	_, err = w.Write(buf.Bytes())
-	return err
+	return pkgcmd.RenderYAMLAs(buf, w, format)
 }
 
 // renderOverrides outputs the Secret/linkerd-config-overrides resource which

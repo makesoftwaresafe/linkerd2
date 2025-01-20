@@ -33,7 +33,7 @@ pub fn pod(ns: &str) -> k8s::Pod {
     }
 }
 
-pub fn server(ns: &str) -> k8s::policy::Server {
+pub fn server(ns: &str, access_policy: Option<String>) -> k8s::policy::Server {
     k8s::policy::Server {
         metadata: k8s::ObjectMeta {
             namespace: Some(ns.to_string()),
@@ -41,9 +41,12 @@ pub fn server(ns: &str) -> k8s::policy::Server {
             ..Default::default()
         },
         spec: k8s::policy::ServerSpec {
-            pod_selector: k8s::labels::Selector::from_iter(Some(("app", "web"))),
+            selector: k8s::policy::server::Selector::Pod(k8s::labels::Selector::from_iter(Some((
+                "app", "web",
+            )))),
             port: k8s::policy::server::Port::Name("http".to_string()),
             proxy_protocol: Some(k8s::policy::server::ProxyProtocol::Http1),
+            access_policy,
         },
     }
 }

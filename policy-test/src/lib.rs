@@ -2,12 +2,21 @@
 #![forbid(unsafe_code)]
 
 pub mod admission;
+pub mod bb;
 pub mod curl;
 pub mod grpc;
+pub mod outbound_api;
+pub mod test_route;
 pub mod web;
 
-use linkerd_policy_controller_k8s_api::{self as k8s, ResourceExt};
+use kube::runtime::wait::Condition;
+use linkerd_policy_controller_k8s_api::{
+    self as k8s,
+    policy::{httproute::ParentReference, EgressNetwork, TrafficPolicy},
+    ResourceExt,
+};
 use maplit::{btreemap, convert_args};
+use test_route::TestRoute;
 use tokio::time;
 use tracing::Instrument;
 
@@ -17,8 +26,14 @@ pub enum LinkerdInject {
     Disabled,
 }
 
+#[derive(Clone, Debug)]
+pub enum Resource {
+    Service(k8s::Service),
+    EgressNetwork(k8s::policy::EgressNetwork),
+}
+
 /// Creates a cluster-scoped resource.
-async fn create_cluster_scoped<T>(client: &kube::Client, obj: T) -> T
+pub async fn create_cluster_scoped<T>(client: &kube::Client, obj: T) -> T
 where
     T: kube::Resource<Scope = kube::core::ClusterResourceScope>,
     T: serde::Serialize + serde::de::DeserializeOwned + Clone + std::fmt::Debug,
@@ -35,6 +50,21 @@ where
         .expect("failed to create resource")
 }
 
+/// Creates a cluster-scoped resource.
+pub async fn delete_cluster_scoped<T>(client: &kube::Client, obj: T)
+where
+    T: kube::Resource<Scope = kube::core::ClusterResourceScope>,
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone + std::fmt::Debug,
+    T::DynamicType: Default,
+{
+    let params = kube::api::DeleteParams {
+        ..Default::default()
+    };
+    let api = kube::Api::<T>::all(client.clone());
+    tracing::trace!(?obj, "Deleting");
+    api.delete(&obj.name_unchecked(), &params).await.unwrap();
+}
+
 /// Creates a namespace-scoped resource.
 pub async fn create<T>(client: &kube::Client, obj: T) -> T
 where
@@ -48,10 +78,54 @@ where
     };
     let api = obj
         .namespace()
-        .map(|ns| kube::Api::<T>::namespaced(client.clone(), &*ns))
+        .map(|ns| kube::Api::<T>::namespaced(client.clone(), &ns))
         .unwrap_or_else(|| kube::Api::<T>::default_namespaced(client.clone()));
     tracing::trace!(?obj, "Creating");
     api.create(&params, &obj)
+        .await
+        .expect("failed to create resource")
+}
+
+/// Deletes a namespace-scoped resource.
+pub async fn delete<T>(client: &kube::Client, obj: T)
+where
+    T: kube::Resource<Scope = kube::core::NamespaceResourceScope>,
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone + std::fmt::Debug,
+    T::DynamicType: Default,
+{
+    let params = kube::api::DeleteParams::default();
+    let api = obj
+        .namespace()
+        .map(|ns| kube::Api::<T>::namespaced(client.clone(), &ns))
+        .unwrap_or_else(|| kube::Api::<T>::default_namespaced(client.clone()));
+
+    tracing::trace!(?obj, "Deleting");
+    api.delete(&obj.name_any(), &params)
+        .await
+        .expect("failed to delete resource");
+}
+
+/// Updates a namespace-scoped resource.
+pub async fn update<T>(client: &kube::Client, mut new: T) -> T
+where
+    T: kube::Resource<Scope = kube::core::NamespaceResourceScope>,
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone + std::fmt::Debug,
+    T::DynamicType: Default,
+{
+    let params = kube::api::PostParams {
+        field_manager: Some("linkerd-policy-test".to_string()),
+        ..Default::default()
+    };
+    let api = new
+        .namespace()
+        .map(|ns| kube::Api::<T>::namespaced(client.clone(), &ns))
+        .unwrap_or_else(|| kube::Api::<T>::default_namespaced(client.clone()));
+
+    let old = api.get_metadata(&new.name_unchecked()).await.unwrap();
+
+    new.meta_mut().resource_version = old.resource_version();
+    tracing::trace!(?new, "Updating");
+    api.replace(&new.name_unchecked(), &params, &new)
         .await
         .expect("failed to create resource")
 }
@@ -134,6 +208,181 @@ pub async fn await_pod_ip(client: &kube::Client, ns: &str, name: &str) -> std::n
         .expect("pod IP must be valid")
 }
 
+// Waits until an HttpRoute with the given namespace and name has been accepted.
+pub async fn await_route_accepted<R: TestRoute>(client: &kube::Client, route: &R) {
+    await_condition(
+        client,
+        &route.namespace().unwrap(),
+        &route.name_unchecked(),
+        |obj: Option<&R>| -> bool {
+            obj.map_or(false, |route| {
+                let conditions = route
+                    .conditions()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                is_status_accepted(&conditions)
+            })
+        },
+    )
+    .await;
+}
+
+// Waits until an HttpRoute with the given namespace and name has a status set
+// on it, then returns the generic route status representation.
+pub async fn await_gateway_route_status(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+) -> k8s::policy::httproute::RouteStatus {
+    use k8s::gateway as api;
+    let route_status = await_condition(client, ns, name, |obj: Option<&api::HttpRoute>| -> bool {
+        obj.and_then(|route| route.status.as_ref()).is_some()
+    })
+    .await
+    .expect("must fetch route")
+    .status
+    .expect("route must contain a status representation")
+    .inner;
+    tracing::trace!(?route_status, name, ns, "got route status");
+    route_status
+}
+
+// Waits until an EgressNet with the given namespace and name has a status set.
+pub async fn await_egress_net_status(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+) -> k8s::policy::egress_network::EgressNetworkStatus {
+    let egress_net_status = await_condition(
+        client,
+        ns,
+        name,
+        |obj: Option<&k8s::policy::EgressNetwork>| -> bool {
+            obj.and_then(|en| en.status.as_ref()).is_some()
+        },
+    )
+    .await
+    .expect("must fetch route")
+    .status
+    .expect("Egress net must contain a status representation");
+    tracing::trace!(?egress_net_status, name, ns, "got egress net status");
+    egress_net_status
+}
+
+// Waits until an GrpcRoute with the given namespace and name has a status set
+// on it, then returns the generic route status representation.
+pub async fn await_grpc_route_status(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+) -> k8s::gateway::GrpcRouteStatus {
+    let route_status = await_condition(
+        client,
+        ns,
+        name,
+        |obj: Option<&k8s::gateway::GrpcRoute>| -> bool {
+            obj.and_then(|route| route.status.as_ref()).is_some()
+        },
+    )
+    .await
+    .expect("must fetch route")
+    .status
+    .expect("route must contain a status representation");
+    tracing::trace!(?route_status, name, ns, "got route status");
+    route_status
+}
+
+// Waits until an TlsRoute with the given namespace and name has a status set
+// on it, then returns the generic route status representation.
+pub async fn await_tls_route_status(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+) -> k8s::gateway::TlsRouteStatus {
+    let route_status = await_condition(
+        client,
+        ns,
+        name,
+        |obj: Option<&k8s::gateway::TlsRoute>| -> bool {
+            obj.and_then(|route| route.status.as_ref()).is_some()
+        },
+    )
+    .await
+    .expect("must fetch route")
+    .status
+    .expect("route must contain a status representation");
+    tracing::trace!(?route_status, name, ns, "got route status");
+    route_status
+}
+
+// Waits until an TcpRoute with the given namespace and name has a status set
+// on it, then returns the generic route status representation.
+pub async fn await_tcp_route_status(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+) -> k8s::gateway::TcpRouteStatus {
+    let route_status = await_condition(
+        client,
+        ns,
+        name,
+        |obj: Option<&k8s::gateway::TcpRoute>| -> bool {
+            obj.and_then(|route| route.status.as_ref()).is_some()
+        },
+    )
+    .await
+    .expect("must fetch route")
+    .status
+    .expect("route must contain a status representation");
+    tracing::trace!(?route_status, name, ns, "got route status");
+    route_status
+}
+
+// Wait for the endpoints controller to populate the Endpoints resource.
+pub fn endpoints_ready(obj: Option<&k8s::Endpoints>) -> bool {
+    if let Some(ep) = obj {
+        return ep
+            .subsets
+            .iter()
+            .flatten()
+            .flat_map(|s| &s.addresses)
+            .any(|a| !a.is_empty());
+    }
+    false
+}
+
+pub fn egress_network_traffic_policy_is(
+    policy: TrafficPolicy,
+) -> impl Condition<EgressNetwork> + 'static {
+    move |egress_net: Option<&EgressNetwork>| {
+        if let Some(egress_net) = &egress_net {
+            return egress_net
+                .status
+                .as_ref()
+                .map_or(false, |s| is_status_accepted(&s.conditions))
+                && egress_net.spec.traffic_policy == policy;
+        }
+        false
+    }
+}
+
+fn is_status_accepted(conditions: &[k8s::Condition]) -> bool {
+    conditions
+        .iter()
+        .any(|c| c.type_ == "Accepted" && c.status == "True")
+}
+
+#[track_caller]
+pub fn assert_status_accepted(conditions: Vec<k8s::Condition>) {
+    assert!(
+        is_status_accepted(&conditions),
+        "status must be accepted: {:?}",
+        conditions
+    );
+}
+
 #[tracing::instrument(skip_all, fields(%pod, %container))]
 pub async fn logs(client: &kube::Client, ns: &str, pod: &str, container: &str) {
     let params = kube::api::LogParams {
@@ -147,6 +396,262 @@ pub async fn logs(client: &kube::Client, ns: &str, pod: &str, container: &str) {
     for message in log.lines() {
         tracing::trace!(%message);
     }
+}
+
+impl Resource {
+    pub fn group(&self) -> String {
+        match self {
+            Self::EgressNetwork(_) => "policy.linkerd.io".to_string(),
+            Self::Service(_) => "core".to_string(),
+        }
+    }
+
+    pub fn kind(&self) -> String {
+        match self {
+            Self::EgressNetwork(_) => "EgressNetwork".to_string(),
+            Self::Service(_) => "Service".to_string(),
+        }
+    }
+
+    pub fn name(&self) -> String {
+        match self {
+            Self::EgressNetwork(e) => e.name_unchecked(),
+            Self::Service(s) => s.name_unchecked(),
+        }
+    }
+
+    pub fn namespace(&self) -> String {
+        match self {
+            Self::EgressNetwork(e) => e.namespace().unwrap(),
+            Self::Service(s) => s.namespace().unwrap(),
+        }
+    }
+
+    pub fn ip(&self) -> String {
+        match self {
+            // For EgressNetwork, we can just return a non-private
+            // IP address as our default cluster setup dictates that
+            // all non-private networks are considered egress. Since
+            // we do not modify this setting in tests for the time being,
+            // returning 1.1.1.1 is fine.
+            Self::EgressNetwork(_) => "1.1.1.1".to_string(),
+            Self::Service(s) => s
+                .spec
+                .as_ref()
+                .expect("Service must have a spec")
+                .cluster_ip
+                .as_ref()
+                .expect("Service must have a cluster ip")
+                .clone(),
+        }
+    }
+}
+
+/// Creates a service resource.
+pub async fn create_parent(client: &kube::Client, parent: Resource) -> Resource {
+    match parent {
+        Resource::Service(svc) => Resource::Service(create(client, svc).await),
+        Resource::EgressNetwork(enet) => Resource::EgressNetwork(create(client, enet).await),
+    }
+}
+
+/// Creates a service resource.
+pub async fn create_service(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    port: i32,
+) -> k8s::Service {
+    let svc = mk_service(ns, name, port);
+
+    create(client, svc).await
+}
+
+/// Creates an egress network resource.
+pub async fn create_egress_network(client: &kube::Client, ns: &str, name: &str) -> EgressNetwork {
+    let en = mk_egress_net(ns, name);
+    create(client, en).await
+}
+
+/// Creates a service resource.
+pub async fn create_opaque_service(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    port: i32,
+) -> k8s::Service {
+    let svc = mk_service(ns, name, port);
+    let svc = annotate_service(
+        svc,
+        std::iter::once(("config.linkerd.io/opaque-ports", port)),
+    );
+
+    create(client, svc).await
+}
+
+/// Creates an egress network resource.
+pub async fn create_opaque_egress_network(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    port: i32,
+) -> k8s::policy::EgressNetwork {
+    let egress = mk_egress_net(ns, name);
+    let egress = annotate_egress_net(
+        egress,
+        std::iter::once(("config.linkerd.io/opaque-ports", port)),
+    );
+
+    create(client, egress).await
+}
+
+/// Creates a service resource with given annotations.
+pub async fn create_annotated_service(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    port: i32,
+    annotations: std::collections::BTreeMap<String, String>,
+) -> k8s::Service {
+    let svc = annotate_service(mk_service(ns, name, port), annotations);
+    create(client, svc).await
+}
+
+/// Creates an egress network resource with given annotations.
+pub async fn create_annotated_egress_network(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    annotations: std::collections::BTreeMap<String, String>,
+) -> k8s::policy::EgressNetwork {
+    let enet = annotate_egress_net(mk_egress_net(ns, name), annotations);
+    create(client, enet).await
+}
+
+pub fn annotate_service<K, V>(
+    mut svc: k8s::Service,
+    annotations: impl IntoIterator<Item = (K, V)>,
+) -> k8s::Service
+where
+    K: ToString,
+    V: ToString,
+{
+    svc.annotations_mut().extend(
+        annotations
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+    );
+    svc
+}
+
+pub fn annotate_egress_net<K, V>(
+    mut egress_net: k8s::policy::EgressNetwork,
+    annotations: impl IntoIterator<Item = (K, V)>,
+) -> k8s::policy::EgressNetwork
+where
+    K: ToString,
+    V: ToString,
+{
+    egress_net.annotations_mut().extend(
+        annotations
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+    );
+    egress_net
+}
+
+pub fn mk_service(ns: &str, name: &str, port: i32) -> k8s::Service {
+    k8s::Service {
+        metadata: k8s::ObjectMeta {
+            namespace: Some(ns.to_string()),
+            name: Some(name.to_string()),
+            ..Default::default()
+        },
+        spec: Some(k8s::ServiceSpec {
+            ports: Some(vec![k8s::ServicePort {
+                port,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..k8s::Service::default()
+    }
+}
+
+pub fn mk_egress_net(ns: &str, name: &str) -> k8s::policy::EgressNetwork {
+    k8s::policy::EgressNetwork {
+        metadata: k8s::ObjectMeta {
+            namespace: Some(ns.to_string()),
+            name: Some(name.to_string()),
+            ..Default::default()
+        },
+        spec: k8s::policy::EgressNetworkSpec {
+            networks: None,
+            traffic_policy: k8s::policy::egress_network::TrafficPolicy::Allow,
+        },
+        status: None,
+    }
+}
+
+#[track_caller]
+pub fn assert_resource_meta(
+    meta: &Option<grpc::meta::Metadata>,
+    parent_ref: ParentReference,
+    port: u16,
+) {
+    println!("meta: {:?}", meta);
+    tracing::debug!(?meta, ?parent_ref, port, "Asserting parent metadata");
+    let mut group = parent_ref.group.unwrap();
+    if group.is_empty() {
+        group = "core".to_string();
+    }
+    assert_eq!(
+        meta,
+        &Some(grpc::meta::Metadata {
+            kind: Some(grpc::meta::metadata::Kind::Resource(grpc::meta::Resource {
+                group,
+                kind: parent_ref.kind.unwrap(),
+                name: parent_ref.name,
+                namespace: parent_ref.namespace.unwrap(),
+                section: "".to_string(),
+                port: port.into()
+            })),
+        })
+    );
+}
+
+pub fn mk_route(
+    ns: &str,
+    name: &str,
+    parent_refs: Option<Vec<k8s::policy::httproute::ParentReference>>,
+) -> k8s::policy::HttpRoute {
+    use k8s::policy::httproute as api;
+    api::HttpRoute {
+        metadata: kube::api::ObjectMeta {
+            namespace: Some(ns.to_string()),
+            name: Some(name.to_string()),
+            ..Default::default()
+        },
+        spec: api::HttpRouteSpec {
+            inner: api::CommonRouteSpec { parent_refs },
+            hostnames: None,
+            rules: Some(vec![]),
+        },
+        status: None,
+    }
+}
+
+pub fn find_route_condition<'a>(
+    statuses: impl IntoIterator<Item = &'a k8s_gateway_api::RouteParentStatus>,
+    parent_name: &'static str,
+) -> Option<&'a k8s::Condition> {
+    statuses
+        .into_iter()
+        .find(|route_status| route_status.parent_ref.name == parent_name)
+        .expect("route must have at least one status set")
+        .conditions
+        .iter()
+        .find(|cond| cond.type_ == "Accepted")
 }
 
 /// Runs a test with a random namespace that is deleted on test completion
@@ -243,14 +748,14 @@ where
     }
 }
 
-async fn await_service_account(client: &kube::Client, ns: &str, name: &str) {
+pub async fn await_service_account(client: &kube::Client, ns: &str, name: &str) {
     use futures::StreamExt;
 
     tracing::trace!(%name, %ns, "Waiting for serviceaccount");
     tokio::pin! {
         let sas = kube::runtime::watcher(
             kube::Api::<k8s::ServiceAccount>::namespaced(client.clone(), ns),
-            kube::api::ListParams::default(),
+            Default::default(),
         );
     }
     loop {
@@ -288,6 +793,17 @@ pub fn random_suffix(len: usize) -> String {
         .take(len)
         .map(char::from)
         .collect()
+}
+
+pub fn egress_network_parent_ref(ns: impl ToString, port: Option<u16>) -> ParentReference {
+    ParentReference {
+        group: Some("policy.linkerd.io".to_string()),
+        kind: Some("EgressNetwork".to_string()),
+        namespace: Some(ns.to_string()),
+        name: "my-egress-net".to_string(),
+        section_name: None,
+        port,
+    }
 }
 
 fn init_tracing() -> tracing::subscriber::DefaultGuard {

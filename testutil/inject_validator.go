@@ -38,6 +38,7 @@ type InjectValidator struct {
 	LogLevel                string
 	LogFormat               string
 	UID                     int
+	GID                     int
 	Version                 string
 	RequireIdentityOnPorts  string
 	SkipOutboundPorts       string
@@ -155,7 +156,11 @@ func (iv *InjectValidator) validateProxyContainer(pod *v1.PodSpec) error {
 	}
 
 	if iv.OutboundPort != 0 {
-		if err := iv.validateEnvVar(proxyContainer, "LINKERD2_PROXY_OUTBOUND_LISTEN_ADDR", fmt.Sprintf("127.0.0.1:%d", iv.OutboundPort)); err != nil {
+		if err := iv.validateEnvVar(
+			proxyContainer,
+			"LINKERD2_PROXY_OUTBOUND_LISTEN_ADDRS",
+			fmt.Sprintf("127.0.0.1:%d", iv.OutboundPort),
+		); err != nil {
 			return err
 		}
 	}
@@ -248,7 +253,8 @@ func (iv *InjectValidator) validateProxyContainer(pod *v1.PodSpec) error {
 	}
 
 	if iv.LogLevel != "" {
-		if err := iv.validateEnvVar(proxyContainer, "LINKERD2_PROXY_LOG", iv.LogLevel); err != nil {
+		expectedLogLevel := fmt.Sprintf("%s,[{headers}]=off,[{request}]=off", iv.LogLevel)
+		if err := iv.validateEnvVar(proxyContainer, "LINKERD2_PROXY_LOG", expectedLogLevel); err != nil {
 			return err
 		}
 	}
@@ -265,6 +271,15 @@ func (iv *InjectValidator) validateProxyContainer(pod *v1.PodSpec) error {
 		}
 		if *proxyContainer.SecurityContext.RunAsUser != int64(iv.UID) {
 			return fmt.Errorf("runAsUser: expected %d, actual %d", iv.UID, *proxyContainer.SecurityContext.RunAsUser)
+		}
+	}
+
+	if iv.GID != 0 {
+		if proxyContainer.SecurityContext.RunAsGroup == nil {
+			return fmt.Errorf("no RunAsGroup specified")
+		}
+		if *proxyContainer.SecurityContext.RunAsGroup != int64(iv.GID) {
+			return fmt.Errorf("runAsGroup: expected %d, actual %d", iv.GID, *proxyContainer.SecurityContext.RunAsGroup)
 		}
 	}
 
@@ -519,6 +534,11 @@ func (iv *InjectValidator) GetFlagsAndAnnotations() ([]string, map[string]string
 	if iv.UID != 0 {
 		annotations[k8s.ProxyUIDAnnotation] = strconv.Itoa(iv.UID)
 		flags = append(flags, fmt.Sprintf("--proxy-uid=%s", strconv.Itoa(iv.UID)))
+	}
+
+	if iv.GID != 0 {
+		annotations[k8s.ProxyGIDAnnotation] = strconv.Itoa(iv.GID)
+		flags = append(flags, fmt.Sprintf("--proxy-gid=%s", strconv.Itoa(iv.GID)))
 	}
 
 	if iv.Version != "" {

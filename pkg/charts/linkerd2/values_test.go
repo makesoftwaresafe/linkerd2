@@ -44,7 +44,9 @@ func TestNewValues(t *testing.T) {
 	expected := &Values{
 		ControllerImage:              "cr.l5d.io/linkerd/controller",
 		ControllerReplicas:           1,
+		RevisionHistoryLimit:         10,
 		ControllerUID:                2103,
+		ControllerGID:                -1,
 		EnableH2Upgrade:              true,
 		EnablePodAntiAffinity:        false,
 		WebhookFailurePolicy:         "Ignore",
@@ -52,7 +54,7 @@ func TestNewValues(t *testing.T) {
 		DeploymentStrategy:           defaultDeploymentStrategy,
 		HeartbeatSchedule:            "",
 		ClusterDomain:                "cluster.local",
-		ClusterNetworks:              "10.0.0.0/8,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16",
+		ClusterNetworks:              "10.0.0.0/8,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,fd00::/8",
 		ImagePullPolicy:              "IfNotPresent",
 		CliVersion:                   "linkerd/cli dev-undefined",
 		ControllerLogLevel:           "info",
@@ -66,7 +68,13 @@ func TestNewValues(t *testing.T) {
 		PodAnnotations:               map[string]string{},
 		PodLabels:                    map[string]string{},
 		EnableEndpointSlices:         true,
+		DisableIPv6:                  true,
 		EnablePodDisruptionBudget:    false,
+		Controller: &Controller{
+			PodDisruptionBudget: &PodDisruptionBudget{
+				MaxUnavailable: 1,
+			},
+		},
 		PodMonitor: &PodMonitor{
 			Enabled:        false,
 			ScrapeInterval: "10s",
@@ -81,6 +89,20 @@ func TestNewValues(t *testing.T) {
 			},
 			ServiceMirror: &PodMonitorComponent{Enabled: true},
 			Proxy:         &PodMonitorComponent{Enabled: true},
+		},
+		DestinationController: &DestinationController{
+			MeshedHttp2ClientProtobuf: map[string]interface{}{
+				"keep_alive": map[string]interface{}{
+					"interval":   map[string]interface{}{"seconds": 10.0},
+					"timeout":    map[string]interface{}{"seconds": 3.0},
+					"while_idle": true,
+				},
+			},
+			PodAnnotations: map[string]string{},
+		},
+		SPValidator: map[string]interface{}{
+			"livenessProbe":  map[string]interface{}{"timeoutSeconds": 1.0},
+			"readinessProbe": map[string]interface{}{"timeoutSeconds": 1.0},
 		},
 		PolicyController: &PolicyController{
 			Image: &Image{
@@ -97,7 +119,7 @@ func TestNewValues(t *testing.T) {
 					Request: "",
 				},
 			},
-			ProbeNetworks: []string{"0.0.0.0/0"},
+			ProbeNetworks: []string{"0.0.0.0/0", "::/0"},
 		},
 		Proxy: &Proxy{
 			EnableExternalProfiles: false,
@@ -105,8 +127,9 @@ func TestNewValues(t *testing.T) {
 				Name:    "cr.l5d.io/linkerd/proxy",
 				Version: "",
 			},
-			LogLevel:  "warn,linkerd=info",
-			LogFormat: "plain",
+			LogLevel:       "warn,linkerd=info,hickory=error",
+			LogFormat:      "plain",
+			LogHTTPHeaders: "off",
 			Ports: &Ports{
 				Admin:    4191,
 				Control:  4190,
@@ -123,13 +146,54 @@ func TestNewValues(t *testing.T) {
 					Request: "",
 				},
 			},
-			UID:                    2102,
-			WaitBeforeExitSeconds:  0,
-			OutboundConnectTimeout: "1000ms",
-			InboundConnectTimeout:  "100ms",
-			OpaquePorts:            "25,587,3306,4444,5432,6379,9300,11211",
-			Await:                  true,
-			DefaultInboundPolicy:   "all-unauthenticated",
+			UID:                                  2102,
+			GID:                                  -1,
+			WaitBeforeExitSeconds:                0,
+			OutboundConnectTimeout:               "1000ms",
+			InboundConnectTimeout:                "100ms",
+			OpaquePorts:                          "25,587,3306,4444,5432,6379,9300,11211",
+			Await:                                true,
+			DefaultInboundPolicy:                 "all-unauthenticated",
+			OutboundDiscoveryCacheUnusedTimeout:  "5s",
+			InboundDiscoveryCacheUnusedTimeout:   "90s",
+			DisableOutboundProtocolDetectTimeout: false,
+			DisableInboundProtocolDetectTimeout:  false,
+			StartupProbe: &StartupProbe{
+				FailureThreshold:    120,
+				InitialDelaySeconds: 0,
+				PeriodSeconds:       1,
+			},
+			ReadinessProbe: &Probe{
+				InitialDelaySeconds: 2,
+				TimeoutSeconds:      1,
+			},
+			LivenessProbe: &Probe{
+				InitialDelaySeconds: 10,
+				TimeoutSeconds:      1,
+			},
+			Control: &ProxyControl{
+				Streams: &ProxyControlStreams{
+					InitialTimeout: "3s",
+					IdleTimeout:    "5m",
+					Lifetime:       "1h",
+				},
+			},
+			Inbound: ProxyParams{
+				"server": ProxyScopeParams{
+					"http2": ProxyProtoParams{
+						"keepAliveInterval": "10s",
+						"keepAliveTimeout":  "3s",
+					},
+				},
+			},
+			Outbound: ProxyParams{
+				"server": ProxyScopeParams{
+					"http2": ProxyProtoParams{
+						"keepAliveInterval": "10s",
+						"keepAliveTimeout":  "3s",
+					},
+				},
+			},
 		},
 		ProxyInit: &ProxyInit{
 			IptablesMode:        "legacy",
@@ -142,29 +206,21 @@ func TestNewValues(t *testing.T) {
 				Name:    "cr.l5d.io/linkerd/proxy-init",
 				Version: testVersion,
 			},
-			Resources: &Resources{
-				CPU: Constraints{
-					Limit:   "100m",
-					Request: "100m",
-				},
-				Memory: Constraints{
-					Limit:   "20Mi",
-					Request: "20Mi",
-				},
-			},
 			XTMountPath: &VolumeMountPath{
 				Name:      "linkerd-proxy-init-xtables-lock",
 				MountPath: "/run",
 			},
-			RunAsRoot: false,
-			RunAsUser: 65534,
+			RunAsRoot:  false,
+			RunAsUser:  65534,
+			RunAsGroup: 65534,
 		},
 		NetworkValidator: &NetworkValidator{
-			LogLevel:    "debug",
-			LogFormat:   "plain",
-			ConnectAddr: "1.1.1.1:20001",
-			ListenAddr:  "0.0.0.0:4140",
-			Timeout:     "10s",
+			LogLevel:              "debug",
+			LogFormat:             "plain",
+			ConnectAddr:           "",
+			ListenAddr:            "",
+			Timeout:               "10s",
+			EnableSecurityContext: true,
 		},
 		Identity: &Identity{
 			ServiceAccountTokenProjection: true,
@@ -174,6 +230,11 @@ func TestNewValues(t *testing.T) {
 				TLS:                &IssuerTLS{},
 				Scheme:             "linkerd.io/tls",
 			},
+			KubeAPI: &KubeAPI{
+				ClientQPS:   100,
+				ClientBurst: 200,
+			},
+			PodAnnotations: map[string]string{},
 		},
 		NodeSelector: map[string]string{
 			"kubernetes.io/os": "linux",
@@ -185,9 +246,13 @@ func TestNewValues(t *testing.T) {
 			},
 		},
 
-		ProxyInjector:    &Webhook{TLS: &TLS{}, NamespaceSelector: namespaceSelectorInjector},
+		ProxyInjector: &ProxyInjector{
+			Webhook:        Webhook{TLS: &TLS{}, NamespaceSelector: namespaceSelectorInjector},
+			PodAnnotations: map[string]string{},
+		},
 		ProfileValidator: &Webhook{TLS: &TLS{}, NamespaceSelector: namespaceSelectorSimple},
 		PolicyValidator:  &Webhook{TLS: &TLS{}, NamespaceSelector: namespaceSelectorSimple},
+		Egress:           &Egress{GlobalEgressNetworkNamespace: "linkerd-egress"},
 	}
 
 	// pin the versions to ensure consistent test result.
@@ -217,9 +282,13 @@ func TestNewValues(t *testing.T) {
 			},
 		}
 
+		expected.HighAvailability = true
 		expected.ControllerReplicas = 3
 		expected.EnablePodAntiAffinity = true
 		expected.EnablePodDisruptionBudget = true
+		expected.Controller.PodDisruptionBudget = &PodDisruptionBudget{
+			MaxUnavailable: 1,
+		}
 		expected.DeploymentStrategy = haDeploymentStrategy
 		expected.WebhookFailurePolicy = "Fail"
 
@@ -274,6 +343,8 @@ func TestNewValues(t *testing.T) {
 func TestHAValuesParsing(t *testing.T) {
 	yml := `
 enablePodDisruptionBudget: true
+PodDisruptionBudget:
+  maxUnavailable: 1
 deploymentStrategy:
   rollingUpdate:
     maxUnavailable: 1

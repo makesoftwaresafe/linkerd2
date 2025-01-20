@@ -3,8 +3,10 @@ use linkerd_policy_controller_k8s_api::{
     self as k8s,
     policy::{LocalTargetRef, NamespacedTargetRef},
 };
-use linkerd_policy_test::{create, create_ready_pod, curl, web, with_temp_ns, LinkerdInject};
-use std::num::NonZeroU16;
+use linkerd_policy_test::{
+    await_condition, create, create_ready_pod, curl, endpoints_ready, web, with_temp_ns,
+    LinkerdInject,
+};
 
 #[tokio::test(flavor = "current_thread")]
 async fn meshtls() {
@@ -14,7 +16,7 @@ async fn meshtls() {
         //
         // The policy requires that all connections are authenticated with MeshTLS.
         let (srv, all_mtls) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(&client, all_authenticated(&ns))
         );
         create(
@@ -33,6 +35,8 @@ async fn meshtls() {
             create(&client, web::service(&ns)),
             create_ready_pod(&client, web::pod(&ns))
         );
+
+        await_condition(&client, &ns, "web", endpoints_ready).await;
 
         let curl = curl::Runner::init(&client, &ns).await;
         let (injected, uninjected) = tokio::join!(
@@ -58,30 +62,15 @@ async fn targets_route() {
         //
         // The policy requires that all connections are authenticated with MeshTLS.
         let (srv, all_mtls) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(&client, all_authenticated(&ns)),
         );
         // Create a route which matches the /allowed path.
         let (root_route, _roux_route) = tokio::join!(
+            create(&client, http_route("root", &ns, &srv.name_unchecked(), "/"),),
             create(
                 &client,
-                http_route(
-                    "root",
-                    &ns,
-                    &srv.name_unchecked(),
-                    "/",
-                    NonZeroU16::new(80).unwrap(),
-                ),
-            ),
-            create(
-                &client,
-                http_route(
-                    "roux",
-                    &ns,
-                    &srv.name_unchecked(),
-                    "/roux",
-                    NonZeroU16::new(80).unwrap(),
-                )
+                http_route("roux", &ns, &srv.name_unchecked(), "/roux")
             )
         );
         // Create a policy which allows all authenticated clients
@@ -101,6 +90,8 @@ async fn targets_route() {
             create(&client, web::service(&ns)),
             create_ready_pod(&client, web::pod(&ns))
         );
+
+        await_condition(&client, &ns, "web", endpoints_ready).await;
 
         let curl = curl::Runner::init(&client, &ns).await;
 
@@ -184,7 +175,7 @@ async fn targets_namespace() {
         //
         // The policy requires that all connections are authenticated with MeshTLS.
         let (_srv, all_mtls) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(&client, all_authenticated(&ns))
         );
         create(
@@ -207,6 +198,8 @@ async fn targets_namespace() {
             create(&client, web::service(&ns)),
             create_ready_pod(&client, web::pod(&ns))
         );
+
+        await_condition(&client, &ns, "web", endpoints_ready).await;
 
         let curl = curl::Runner::init(&client, &ns).await;
         let (injected, uninjected) = tokio::join!(
@@ -233,7 +226,7 @@ async fn meshtls_namespace() {
         // The policy requires that all connections are authenticated with MeshTLS
         // and come from service accounts in the given namespace.
         let (srv, mtls_ns) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(&client, ns_authenticated(&ns))
         );
         create(
@@ -252,6 +245,8 @@ async fn meshtls_namespace() {
             create(&client, web::service(&ns)),
             create_ready_pod(&client, web::pod(&ns))
         );
+
+        await_condition(&client, &ns, "web", endpoints_ready).await;
 
         let curl = curl::Runner::init(&client, &ns).await;
         let (injected, uninjected) = tokio::join!(
@@ -290,7 +285,7 @@ async fn network() {
         // Once we know the IP of the (blocked) pod, create an web
         // authorization policy that permits connections from this pod.
         let (srv, allow_ips) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(&client, allow_ips(&ns, Some(blessed_ip)))
         );
         create(
@@ -310,9 +305,12 @@ async fn network() {
             create_ready_pod(&client, web::pod(&ns))
         );
 
+        await_condition(&client, &ns, "web", endpoints_ready).await;
+
         // Once the web pod is ready, delete the `curl-lock` configmap to
         // unblock curl from running.
         curl.delete_lock().await;
+        tracing::info!("unblocked curl");
 
         // The blessed pod should be able to connect to the web pod.
         let status = blessed.exit_code().await;
@@ -361,7 +359,7 @@ async fn both() {
         // Once we know the IP of the (blocked) pod, create an web
         // authorization policy that permits connections from this pod.
         let (srv, allow_ips, all_mtls) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(
                 &client,
                 allow_ips(&ns, vec![blessed_injected_ip, blessed_uninjected_ip]),
@@ -387,6 +385,8 @@ async fn both() {
             create(&client, web::service(&ns)),
             create_ready_pod(&client, web::pod(&ns))
         );
+
+        await_condition(&client, &ns, "web", endpoints_ready).await;
 
         // Once the web pod is ready, delete the `curl-lock` configmap to
         // unblock curl from running.
@@ -459,7 +459,7 @@ async fn either() {
         // Once we know the IP of the (blocked) pod, create an web
         // authorization policy that permits connections from this pod.
         let (srv, allow_ips, all_mtls) = tokio::join!(
-            create(&client, web::server(&ns)),
+            create(&client, web::server(&ns, None)),
             create(&client, allow_ips(&ns, vec![blessed_uninjected_ip])),
             create(&client, all_authenticated(&ns))
         );
@@ -490,10 +490,12 @@ async fn either() {
             create_ready_pod(&client, web::pod(&ns)),
         );
 
+        await_condition(&client, &ns, "web", endpoints_ready).await;
+
         // Once the web pod is ready, delete the `curl-lock` configmap to
         // unblock curl from running.
         curl.delete_lock().await;
-        tracing::info!("unblocking curl");
+        tracing::info!("unblocked curl");
 
         let (blessed_injected_status, blessed_uninjected_status) =
             tokio::join!(blessed_injected.exit_code(), blessed_uninjected.exit_code());
@@ -534,7 +536,7 @@ async fn either() {
 async fn empty_authentications() {
     with_temp_ns(|client, ns| async move {
         // Create a policy that does not require any authentications.
-        let srv = create(&client, web::server(&ns)).await;
+        let srv = create(&client, web::server(&ns, None)).await;
         create(
             &client,
             authz_policy(&ns, "web", LocalTargetRef::from_resource(&srv), None),
@@ -546,6 +548,8 @@ async fn empty_authentications() {
             create(&client, web::service(&ns)),
             create_ready_pod(&client, web::pod(&ns))
         );
+
+        await_condition(&client, &ns, "web", endpoints_ready).await;
 
         // All requests should work.
         let curl = curl::Runner::init(&client, &ns).await;
@@ -637,13 +641,7 @@ fn allow_ips(
     }
 }
 
-fn http_route(
-    name: &str,
-    ns: &str,
-    server_name: &str,
-    path: &str,
-    port: NonZeroU16,
-) -> k8s::policy::HttpRoute {
+fn http_route(name: &str, ns: &str, server_name: &str, path: &str) -> k8s::policy::HttpRoute {
     k8s::policy::HttpRoute {
         metadata: k8s::ObjectMeta {
             namespace: Some(ns.to_string()),
@@ -658,7 +656,7 @@ fn http_route(
                     namespace: Some(ns.to_string()),
                     name: server_name.to_string(),
                     section_name: None,
-                    port: Some(port.into()),
+                    port: None,
                 }]),
             },
             hostnames: None,
@@ -670,6 +668,8 @@ fn http_route(
                     ..Default::default()
                 }]),
                 filters: None,
+                backend_refs: None,
+                timeouts: None,
             }]),
         },
         status: None,

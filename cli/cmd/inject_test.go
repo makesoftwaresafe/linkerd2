@@ -33,6 +33,8 @@ func mkFilename(filename string, verbose bool) string {
 }
 
 func testUninjectAndInject(t *testing.T, tc testCase) {
+	t.Helper()
+
 	file, err := os.Open("testdata/" + tc.inputFileName)
 	if err != nil {
 		t.Errorf("error opening test input file: %v\n", err)
@@ -50,7 +52,7 @@ func testUninjectAndInject(t *testing.T, tc testCase) {
 		allowNsInject:       true,
 	}
 
-	if exitCode := uninjectAndInject([]io.Reader{read}, report, output, transformer); exitCode != 0 {
+	if exitCode := uninjectAndInject([]io.Reader{read}, report, output, transformer, "yaml"); exitCode != 0 {
 		t.Errorf("Unexpected error injecting YAML: %v", report)
 	}
 	if err := testDataDiffer.DiffTestYAML(tc.goldenFileName, output.String()); err != nil {
@@ -344,6 +346,43 @@ func TestUninjectAndInject(t *testing.T) {
 				return values
 			}(),
 		},
+		{
+			inputFileName:  "inject_emojivoto_deployment.input.yml",
+			goldenFileName: "inject_emojivoto_deployment_native_sidecar.golden.yml",
+			reportFileName: "inject_emojivoto_deployment.report",
+			injectProxy:    true,
+			testInjectConfig: func() *linkerd2.Values {
+				values := defaultConfig()
+				values.Proxy.NativeSidecar = true
+				return values
+			}(),
+		},
+		{
+			inputFileName:  "inject_emojivoto_deployment.input.yml",
+			goldenFileName: "inject_emojivoto_deployment_params.golden.yml",
+			reportFileName: "inject_emojivoto_deployment.report",
+			injectProxy:    true,
+			testInjectConfig: func() *linkerd2.Values {
+				values := defaultConfig()
+				values.Proxy.Inbound = linkerd2.ProxyParams{
+					"scope": linkerd2.ProxyScopeParams{
+						"proto": linkerd2.ProxyProtoParams{
+							"appleSauce": "valueA",
+							"blueberry":  3.14,
+						},
+					},
+				}
+				values.Proxy.Outbound = linkerd2.ProxyParams{
+					"scope": linkerd2.ProxyScopeParams{
+						"proto": linkerd2.ProxyProtoParams{
+							"applesauce": "valueA",
+							"blueBerry":  true,
+						},
+					},
+				}
+				return values
+			}(),
+		},
 	}
 
 	for i, tc := range testCases {
@@ -369,6 +408,8 @@ type injectCmd struct {
 }
 
 func testInjectCmd(t *testing.T, tc injectCmd) {
+	t.Helper()
+
 	testConfig := tc.values
 	if testConfig == nil {
 		var err error
@@ -391,7 +432,7 @@ func testInjectCmd(t *testing.T, tc injectCmd) {
 		injectProxy: tc.injectProxy,
 		values:      testConfig,
 	}
-	exitCode := runInjectCmd([]io.Reader{in}, errBuffer, outBuffer, transformer)
+	exitCode := runInjectCmd([]io.Reader{in}, errBuffer, outBuffer, transformer, "yaml")
 	if exitCode != tc.exitCode {
 		t.Fatalf("Expected exit code to be %d but got: %d", tc.exitCode, exitCode)
 	}
@@ -497,7 +538,7 @@ func testInjectFilePath(t *testing.T, tc injectFilePath) {
 		injectProxy: true,
 		values:      values,
 	}
-	if exitCode := runInjectCmd(in, errBuf, actual, transformer); exitCode != 0 {
+	if exitCode := runInjectCmd(in, errBuf, actual, transformer, "yaml"); exitCode != 0 {
 		t.Fatal("Unexpected error. Exit code from runInjectCmd: ", exitCode)
 	}
 	if err := testDataDiffer.DiffTestYAML(tc.expectedFile, actual.String()); err != nil {
@@ -524,7 +565,7 @@ func testReadFromFolder(t *testing.T, resourceFolder string, expectedFolder stri
 		injectProxy: true,
 		values:      values,
 	}
-	if exitCode := runInjectCmd(in, errBuf, actual, transformer); exitCode != 0 {
+	if exitCode := runInjectCmd(in, errBuf, actual, transformer, "yaml"); exitCode != 0 {
 		t.Fatal("Unexpected error. Exit code from runInjectCmd: ", exitCode)
 	}
 
@@ -667,6 +708,7 @@ func TestProxyConfigurationAnnotations(t *testing.T) {
 	values.Proxy.Ports.Inbound = 4144
 	values.Proxy.Ports.Outbound = 4141
 	values.Proxy.UID = 999
+	values.Proxy.GID = 999
 	values.Proxy.LogLevel = "debug"
 	values.Proxy.LogFormat = "cool"
 	values.Proxy.EnableExternalProfiles = true
@@ -678,6 +720,7 @@ func TestProxyConfigurationAnnotations(t *testing.T) {
 	values.Proxy.Await = false
 	values.Proxy.AccessLog = "apache"
 	values.Proxy.ShutdownGracePeriod = "60s"
+	values.Proxy.NativeSidecar = true
 
 	expectedOverrides := map[string]string{
 		k8s.ProxyIgnoreInboundPortsAnnotation:  "8500-8505",
@@ -687,6 +730,7 @@ func TestProxyConfigurationAnnotations(t *testing.T) {
 		k8s.ProxyInboundPortAnnotation:         "4144",
 		k8s.ProxyOutboundPortAnnotation:        "4141",
 		k8s.ProxyUIDAnnotation:                 "999",
+		k8s.ProxyGIDAnnotation:                 "999",
 		k8s.ProxyLogLevelAnnotation:            "debug",
 		k8s.ProxyLogFormatAnnotation:           "cool",
 
@@ -699,6 +743,7 @@ func TestProxyConfigurationAnnotations(t *testing.T) {
 		k8s.ProxyAwait:                            "disabled",
 		k8s.ProxyAccessLogAnnotation:              "apache",
 		k8s.ProxyShutdownGracePeriodAnnotation:    "60s",
+		k8s.ProxyEnableNativeSidecarAnnotation:    "true",
 	}
 
 	overrides := getOverrideAnnotations(values, baseValues)

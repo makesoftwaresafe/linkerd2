@@ -9,15 +9,26 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: {{.}}
-  namespace: {{$.Release.Namespace}}
   labels:
     linkerd.io/extension: multicluster
     {{- with $.Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" $ }}
 rules:
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["list", "get", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["list", "get", "watch"]
 - apiGroups: [""]
-  resources: ["services", "endpoints"]
+  resources: ["pods", "endpoints", "services"]
+  verbs: ["list", "get", "watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["list", "get", "watch"]
+- apiGroups: ["policy.linkerd.io"]
+  resources: ["servers"]
   verbs: ["list", "get", "watch"]
 - apiGroups: [""]
   resources: ["configmaps"]
@@ -37,6 +48,7 @@ metadata:
     {{- with $.Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
   annotations:
     {{ include "partials.annotations.created-by" $ }}
+{{- include "partials.image-pull-secrets" $.Values.imagePullSecrets }}
 ---
 apiVersion: v1
 kind: Secret
@@ -55,7 +67,6 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: {{.}}
-  namespace: {{$.Release.Namespace}}
   labels:
     linkerd.io/extension: multicluster
     {{- with $.Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}

@@ -29,10 +29,12 @@ type (
 		ControllerImage              string                 `json:"controllerImage"`
 		ControllerReplicas           uint                   `json:"controllerReplicas"`
 		ControllerUID                int64                  `json:"controllerUID"`
+		ControllerGID                int64                  `json:"controllerGID"`
 		EnableH2Upgrade              bool                   `json:"enableH2Upgrade"`
 		EnablePodAntiAffinity        bool                   `json:"enablePodAntiAffinity"`
 		NodeAffinity                 map[string]interface{} `json:"nodeAffinity"`
 		EnablePodDisruptionBudget    bool                   `json:"enablePodDisruptionBudget"`
+		Controller                   *Controller            `json:"controller"`
 		WebhookFailurePolicy         string                 `json:"webhookFailurePolicy"`
 		DeploymentStrategy           map[string]interface{} `json:"deploymentStrategy,omitempty"`
 		DisableHeartBeat             bool                   `json:"disableHeartBeat"`
@@ -48,6 +50,7 @@ type (
 		HighAvailability             bool                   `json:"highAvailability"`
 		CNIEnabled                   bool                   `json:"cniEnabled"`
 		EnableEndpointSlices         bool                   `json:"enableEndpointSlices"`
+		DisableIPv6                  bool                   `json:"disableIPv6"`
 		ControlPlaneTracing          bool                   `json:"controlPlaneTracing"`
 		ControlPlaneTracingNamespace string                 `json:"controlPlaneTracingNamespace"`
 		IdentityTrustAnchorsPEM      string                 `json:"identityTrustAnchorsPEM"`
@@ -55,6 +58,11 @@ type (
 		PrometheusURL                string                 `json:"prometheusUrl"`
 		ImagePullSecrets             []map[string]string    `json:"imagePullSecrets"`
 		LinkerdVersion               string                 `json:"linkerdVersion"`
+		RevisionHistoryLimit         uint                   `json:"revisionHistoryLimit"`
+
+		DestinationController *DestinationController `json:"destinationController"`
+		Heartbeat             map[string]interface{} `json:"heartbeat"`
+		SPValidator           map[string]interface{} `json:"spValidator"`
 
 		PodAnnotations    map[string]string `json:"podAnnotations"`
 		PodLabels         map[string]string `json:"podLabels"`
@@ -67,7 +75,7 @@ type (
 		NetworkValidator *NetworkValidator `json:"networkValidator"`
 		Identity         *Identity         `json:"identity"`
 		DebugContainer   *DebugContainer   `json:"debugContainer"`
-		ProxyInjector    *Webhook          `json:"proxyInjector"`
+		ProxyInjector    *ProxyInjector    `json:"proxyInjector"`
 		ProfileValidator *Webhook          `json:"profileValidator"`
 		PolicyValidator  *Webhook          `json:"policyValidator"`
 		NodeSelector     map[string]string `json:"nodeSelector"`
@@ -81,6 +89,27 @@ type (
 		DestinationProxyResources   *Resources `json:"destinationProxyResources"`
 		IdentityProxyResources      *Resources `json:"identityProxyResources"`
 		ProxyInjectorProxyResources *Resources `json:"proxyInjectorProxyResources"`
+		Egress                      *Egress    `json:"egress"`
+	}
+
+	// Resources represents the computational resources setup for a given container
+	Egress struct {
+		GlobalEgressNetworkNamespace string `json:"globalEgressNetworkNamespace"`
+	}
+
+	// Controller contains the fields to set the controller container
+	Controller struct {
+		PodDisruptionBudget *PodDisruptionBudget `json:"podDisruptionBudget"`
+	}
+
+	DestinationController struct {
+		MeshedHttp2ClientProtobuf map[string]interface{} `json:"meshedHttp2ClientProtobuf"`
+		PodAnnotations            map[string]string      `json:"podAnnotations"`
+	}
+
+	// PodDisruptionBudget contains the fields to set the PDB
+	PodDisruptionBudget struct {
+		MaxUnavailable int `json:"maxUnavailable"`
 	}
 
 	// ConfigJSONs is the JSON encoding of the Linkerd configuration
@@ -94,55 +123,90 @@ type (
 	Proxy struct {
 		Capabilities *Capabilities `json:"capabilities"`
 		// This should match .Resources.CPU.Limit, but must be a whole number
-		Cores                         int64            `json:"cores,omitempty"`
-		EnableExternalProfiles        bool             `json:"enableExternalProfiles"`
-		Image                         *Image           `json:"image"`
-		LogLevel                      string           `json:"logLevel"`
-		LogFormat                     string           `json:"logFormat"`
-		SAMountPath                   *VolumeMountPath `json:"saMountPath"`
-		Ports                         *Ports           `json:"ports"`
-		Resources                     *Resources       `json:"resources"`
-		UID                           int64            `json:"uid"`
-		WaitBeforeExitSeconds         uint64           `json:"waitBeforeExitSeconds"`
-		IsGateway                     bool             `json:"isGateway"`
-		IsIngress                     bool             `json:"isIngress"`
-		RequireIdentityOnInboundPorts string           `json:"requireIdentityOnInboundPorts"`
-		OutboundConnectTimeout        string           `json:"outboundConnectTimeout"`
-		InboundConnectTimeout         string           `json:"inboundConnectTimeout"`
-		PodInboundPorts               string           `json:"podInboundPorts"`
-		OpaquePorts                   string           `json:"opaquePorts"`
-		Await                         bool             `json:"await"`
-		DefaultInboundPolicy          string           `json:"defaultInboundPolicy"`
-		AccessLog                     string           `json:"accessLog"`
-		ShutdownGracePeriod           string           `json:"shutdownGracePeriod"`
+		Cores                                int64            `json:"cores,omitempty"`
+		EnableExternalProfiles               bool             `json:"enableExternalProfiles"`
+		Image                                *Image           `json:"image"`
+		EnableShutdownEndpoint               bool             `json:"enableShutdownEndpoint"`
+		LogLevel                             string           `json:"logLevel"`
+		LogFormat                            string           `json:"logFormat"`
+		LogHTTPHeaders                       string           `json:"logHTTPHeaders"`
+		SAMountPath                          *VolumeMountPath `json:"saMountPath"`
+		Ports                                *Ports           `json:"ports"`
+		Resources                            *Resources       `json:"resources"`
+		UID                                  int64            `json:"uid"`
+		GID                                  int64            `json:"gid"`
+		WaitBeforeExitSeconds                uint64           `json:"waitBeforeExitSeconds"`
+		IsGateway                            bool             `json:"isGateway"`
+		IsIngress                            bool             `json:"isIngress"`
+		RequireIdentityOnInboundPorts        string           `json:"requireIdentityOnInboundPorts"`
+		OutboundConnectTimeout               string           `json:"outboundConnectTimeout"`
+		InboundConnectTimeout                string           `json:"inboundConnectTimeout"`
+		OutboundDiscoveryCacheUnusedTimeout  string           `json:"outboundDiscoveryCacheUnusedTimeout"`
+		InboundDiscoveryCacheUnusedTimeout   string           `json:"inboundDiscoveryCacheUnusedTimeout"`
+		DisableOutboundProtocolDetectTimeout bool             `json:"disableOutboundProtocolDetectTimeout"`
+		DisableInboundProtocolDetectTimeout  bool             `json:"disableInboundProtocolDetectTimeout"`
+		PodInboundPorts                      string           `json:"podInboundPorts"`
+		OpaquePorts                          string           `json:"opaquePorts"`
+		Await                                bool             `json:"await"`
+		DefaultInboundPolicy                 string           `json:"defaultInboundPolicy"`
+		AccessLog                            string           `json:"accessLog"`
+		ShutdownGracePeriod                  string           `json:"shutdownGracePeriod"`
+		NativeSidecar                        bool             `json:"nativeSidecar"`
+		StartupProbe                         *StartupProbe    `json:"startupProbe"`
+		ReadinessProbe                       *Probe           `json:"readinessProbe"`
+		LivenessProbe                        *Probe           `json:"livenessProbe"`
+		Control                              *ProxyControl    `json:"control"`
+
+		AdditionalEnv   []corev1.EnvVar `json:"additionalEnv"`
+		ExperimentalEnv []corev1.EnvVar `json:"experimentalEnv"`
+
+		Inbound  ProxyParams `json:"inbound,omitempty"`
+		Outbound ProxyParams `json:"outbound,omitempty"`
+	}
+
+	ProxyParams      = map[string]ProxyScopeParams
+	ProxyScopeParams = map[string]ProxyProtoParams
+	ProxyProtoParams = map[string]interface{}
+
+	ProxyControl struct {
+		Streams *ProxyControlStreams `json:"streams"`
+	}
+
+	ProxyControlStreams struct {
+		InitialTimeout string `json:"initialTimeout"`
+		IdleTimeout    string `json:"idleTimeout"`
+		Lifetime       string `json:"lifetime"`
 	}
 
 	// ProxyInit contains the fields to set the proxy-init container
 	ProxyInit struct {
-		Capabilities         *Capabilities    `json:"capabilities"`
-		IgnoreInboundPorts   string           `json:"ignoreInboundPorts"`
-		IgnoreOutboundPorts  string           `json:"ignoreOutboundPorts"`
-		KubeAPIServerPorts   string           `json:"kubeAPIServerPorts"`
-		SkipSubnets          string           `json:"skipSubnets"`
-		LogLevel             string           `json:"logLevel"`
-		LogFormat            string           `json:"logFormat"`
-		Image                *Image           `json:"image"`
-		SAMountPath          *VolumeMountPath `json:"saMountPath"`
-		XTMountPath          *VolumeMountPath `json:"xtMountPath"`
-		Resources            *Resources       `json:"resources"`
-		CloseWaitTimeoutSecs int64            `json:"closeWaitTimeoutSecs"`
-		Privileged           bool             `json:"privileged"`
-		RunAsRoot            bool             `json:"runAsRoot"`
-		RunAsUser            int64            `json:"runAsUser"`
-		IptablesMode         string           `json:"iptablesMode"`
+		Capabilities        *Capabilities    `json:"capabilities"`
+		IgnoreInboundPorts  string           `json:"ignoreInboundPorts"`
+		IgnoreOutboundPorts string           `json:"ignoreOutboundPorts"`
+		KubeAPIServerPorts  string           `json:"kubeAPIServerPorts"`
+		SkipSubnets         string           `json:"skipSubnets"`
+		LogLevel            string           `json:"logLevel"`
+		LogFormat           string           `json:"logFormat"`
+		Image               *Image           `json:"image"`
+		SAMountPath         *VolumeMountPath `json:"saMountPath"`
+		XTMountPath         *VolumeMountPath `json:"xtMountPath"`
+		/* DEPRECATED: should be removed after stable-2.16.0, left in for bc */
+		Resources            *Resources `json:"resources"`
+		CloseWaitTimeoutSecs int64      `json:"closeWaitTimeoutSecs"`
+		Privileged           bool       `json:"privileged"`
+		RunAsRoot            bool       `json:"runAsRoot"`
+		RunAsUser            int64      `json:"runAsUser"`
+		RunAsGroup           int64      `json:"runAsGroup"`
+		IptablesMode         string     `json:"iptablesMode"`
 	}
 
 	NetworkValidator struct {
-		LogLevel    string `json:"logLevel"`
-		LogFormat   string `json:"logFormat"`
-		ConnectAddr string `json:"connectAddr"`
-		ListenAddr  string `json:"listenAddr"`
-		Timeout     string `json:"timeout"`
+		LogLevel              string `json:"logLevel"`
+		LogFormat             string `json:"logFormat"`
+		ConnectAddr           string `json:"connectAddr"`
+		ListenAddr            string `json:"listenAddr"`
+		Timeout               string `json:"timeout"`
+		EnableSecurityContext bool   `json:"enableSecurityContext"`
 	}
 
 	// DebugContainer contains the fields to set the debugging sidecar
@@ -194,6 +258,11 @@ type (
 		Outbound int32 `json:"outbound"`
 	}
 
+	Probe struct {
+		InitialDelaySeconds uint `json:"initialDelaySeconds"`
+		TimeoutSeconds      uint `json:"timeoutSeconds"`
+	}
+
 	// Constraints wraps the Limit and Request settings for computational resources
 	Constraints struct {
 		Limit   string `json:"limit"`
@@ -221,12 +290,24 @@ type (
 		EphemeralStorage Constraints `json:"ephemeral-storage"`
 	}
 
+	// StartupProbe represents the initContainer startup probe parameters for the proxy
+	StartupProbe struct {
+		InitialDelaySeconds uint `json:"initialDelaySeconds"`
+		PeriodSeconds       uint `json:"periodSeconds"`
+		FailureThreshold    uint `json:"failureThreshold"`
+	}
+
 	// Identity contains the fields to set the identity variables in the proxy
 	// sidecar container
 	Identity struct {
-		ExternalCA                    bool    `json:"externalCA"`
-		ServiceAccountTokenProjection bool    `json:"serviceAccountTokenProjection"`
-		Issuer                        *Issuer `json:"issuer"`
+		ExternalCA                    bool              `json:"externalCA"`
+		ServiceAccountTokenProjection bool              `json:"serviceAccountTokenProjection"`
+		Issuer                        *Issuer           `json:"issuer"`
+		KubeAPI                       *KubeAPI          `json:"kubeAPI"`
+		PodAnnotations                map[string]string `json:"podAnnotations"`
+
+		AdditionalEnv   []corev1.EnvVar `json:"additionalEnv"`
+		ExperimentalEnv []corev1.EnvVar `json:"experimentalEnv"`
 	}
 
 	// Issuer has the Helm variables of the identity issuer
@@ -235,6 +316,20 @@ type (
 		ClockSkewAllowance string     `json:"clockSkewAllowance"`
 		IssuanceLifetime   string     `json:"issuanceLifetime"`
 		TLS                *IssuerTLS `json:"tls"`
+	}
+
+	// KubeAPI contains the kube-apiserver client config
+	KubeAPI struct {
+		ClientQPS   float32 `json:"clientQPS"`
+		ClientBurst int     `json:"clientBurst"`
+	}
+
+	// ProxyInjector configures the proxy-injector webhook
+	ProxyInjector struct {
+		Webhook
+		PodAnnotations  map[string]string `json:"podAnnotations"`
+		AdditionalEnv   []corev1.EnvVar   `json:"additionalEnv"`
+		ExperimentalEnv []corev1.EnvVar   `json:"experimentalEnv"`
 	}
 
 	// Webhook Helm variables for a webhook

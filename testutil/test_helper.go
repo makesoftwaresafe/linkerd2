@@ -38,6 +38,8 @@ type TestHelper struct {
 	uninstall            bool
 	cni                  bool
 	calico               bool
+	dualStack            bool
+	nativeSidecar        bool
 	defaultInboundPolicy string
 	httpClient           http.Client
 	KubernetesHelper
@@ -96,6 +98,13 @@ var LinkerdVizDeployReplicas = map[string]DeploySpec{
 // each Deployment and the main container name for multicluster components
 var MulticlusterDeployReplicas = map[string]DeploySpec{
 	"linkerd-gateway": {"linkerd-multicluster", 1},
+}
+
+// MulticlusterSourceReplicas is a map containing the number of replicas for the
+// Service Mirror component; component that we'd only expect in the
+// source cluster.
+var MulticlusterSourceReplicas = map[string]DeploySpec{
+	"linkerd-service-mirror-target": {Namespace: "linkerd-multicluster", Replicas: 1},
 }
 
 // ExternalVizDeployReplicas has an external prometheus instance that's in a
@@ -200,6 +209,8 @@ func NewTestHelper() *TestHelper {
 	uninstall := flag.Bool("uninstall", false, "whether to run the 'linkerd uninstall' integration test")
 	cni := flag.Bool("cni", false, "whether to install linkerd with CNI enabled")
 	calico := flag.Bool("calico", false, "whether to install calico CNI plugin")
+	dualStack := flag.Bool("dual-stack", false, "whether to run the dual-stack tests")
+	nativeSidecar := flag.Bool("native-sidecar", false, "whether to install using native sidecar injection")
 	defaultInboundPolicy := flag.String("default-inbound-policy", "", "if non-empty, passed to --set proxy.defaultInboundPolicy at linkerd's install time")
 	flag.Parse()
 
@@ -245,6 +256,8 @@ func NewTestHelper() *TestHelper {
 		externalPrometheus:   *externalPrometheus,
 		cni:                  *cni,
 		calico:               *calico,
+		dualStack:            *dualStack,
+		nativeSidecar:        *nativeSidecar,
 		uninstall:            *uninstall,
 		defaultInboundPolicy: *defaultInboundPolicy,
 	}
@@ -387,6 +400,16 @@ func (h *TestHelper) CNI() bool {
 // Calico determines whether Calico CNI plug-in is enabled
 func (h *TestHelper) Calico() bool {
 	return h.calico
+}
+
+// DualStack determines whether the DualStack tests are run
+func (h *TestHelper) DualStack() bool {
+	return h.dualStack
+}
+
+// NativeSidecar determines whether native sidecar injection is enabled
+func (h *TestHelper) NativeSidecar() bool {
+	return h.nativeSidecar
 }
 
 // AddInstalledExtension adds an extension name to installedExtensions to
@@ -705,7 +728,10 @@ func (h *TestHelper) DownloadCLIBinary(filepath, version string) error {
 	defer resp.Body.Close()
 
 	// Create if it doesn't already exist
-	out, err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE, 0555)
+	// The CLI binary needs to be executable so we ignore lint errors about
+	// file permissions.
+	//nolint:gosec
+	out, err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE, 0500)
 	if err != nil {
 		return err
 	}
